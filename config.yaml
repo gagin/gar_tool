@@ -1,0 +1,66 @@
+# Extraction configuration
+name: public_art_vancouver # Used as a base name for SQLite file
+
+# LLM configuration defaults, can be overridden by command line parameters
+defaults:
+  context_window: 50000
+  temperature: 0
+  debug_sample_length: 1500
+  timeout: 30
+  data_folder: ./public_art_vancouver
+  max_failures: 1  # Maximum number of failures per chunk
+  model: google/gemini-2.0-flash-001:floor
+  provider: https://openrouter.ai/api/v1
+
+# Node definitions
+nodes:
+  notes:
+    description: Your analysis notes (not stored)
+    format: text
+    required: false
+  
+  art_name:
+    description: Name of the art
+    format: text
+    db_column: name
+
+  is_first_nations:
+    description: Is it a first nations art
+    format: boolean
+    db_column: first_nations   
+
+  is_first_nations_quote:
+    description: >
+      Provide a full sentence from the document that was base for determination whether
+      it's first nations
+    format: text
+    db_column: first_nations_quote
+  
+  is_relevant:
+    description: >
+      Can this be considered specific to Vancouver, or could be in some other city with
+      the same result?
+    format: boolean
+    db_column: relevant
+
+  is_relevant_quote:
+    description: >
+     Provide a full sentence from the document that was base for determination whether
+     it's Vancouver-specific
+    format: text
+    db_column: relevant_quote
+
+  visually_interesting:
+    description: How interesting it looks on scale of 0 to 10, as in being instagrammable
+    format: number
+    db_column: instagramability
+
+# Prompt template
+prompt_template: |
+  Analyze the files to extract structured case details.        
+  Return a JSON with the following nodes:
+  {node_descriptions}
+  Response must be strictly JSON with these exact node names.
+  Any reasoning, explanations, notes, comments should be limited to 50 words and go to notes node.
+  Do your best to make subjective choices.
+  Treat it as a regular resident of the city.
