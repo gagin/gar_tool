@@ -12,6 +12,7 @@ This tool helps you extract specific information from large collections of text 
 - [Models](#models)
 - [Parallel Execution](#parallel-execution)
 - [Command-Line Options](#cli)
+- [Troubleshooting](#trouble)
 - [Credits](#credits)
 - [To-Do](#to-do)
 
@@ -113,6 +114,7 @@ nodes:
     db_column: instagramability
 ```
 > Note: To handle long strings in YAML, which has a practical line width recommendation of 80 characters, the > character after a node name allows you to write multiple indented lines that are then treated as a single, continuous line. This recommendation helps ensure that YAML content remains easily readable without requiring horizontal scrolling or line wrapping on typical displays.
+> Also, ensure you use consistent indentation (usually spaces are recommended, although I personally prefer tabs), as mixing tabs and spaces or inconsistent spacing will lead to nodes being skipped or misinterpreted.
 
 **Edit the prompt section** below with content-specific notes and a description of the role/expertise of the LLM persona. The persona you define greatly influences the categorization results. For instance, "instagrammability" ratings will differ if the model acts as a tourist versus an art critic, highlighting the importance of persona selection.
 
@@ -222,6 +224,7 @@ Explicitly specify formatting requirements:
 - Target language for text fields
 - Gender and number for languages with grammatical gender
 - Standard categories or ranges for classifications
+- When asking the model for a free-form category, still provide explicit formatting instructions, such as "Capitalize the word, use a noun in singular form." This prevents inconsistencies like mixing "History" and "historic"
 - Target length for text responses
 
 Example:
@@ -306,6 +309,12 @@ options:
   --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
   --provider PROVIDER   Base URL of the LLM provider API (e.g., '[https://api.openrouter.ai/v1](https://api.openrouter.ai/v1)'). Defaults to OpenRouter.
 ```
+
+## <a id="trouble"></a>Troubleshooting
+
+* **Some of my categories are not in the database:**
+    * **Check indentation:** Ensure that the indentation of your category definitions in `config.yaml` is aligned with other nodes and that you are using consistent spaces for indentation. Mixing tabs and spaces, or using inconsistent numbers of spaces, will cause nodes to be skipped, resulting in them not appearing in the database. While this may not always result in a visible error message, it will lead to incomplete data extraction.
+
 ## <a id="credits"></a>Credits
 
 Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing small portions. Expect potential code problems. This is an analyst's tool, not professional software. Gemini was also hugely helpful with this document.
@@ -316,3 +325,5 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - Include default values in the `--help` output
 - Support direct CSV input
 - The `format` field is now shown to the model, but in the db booleans are still created as TEXT
+- Use structured outputs for supported models instead of manually prompting models for JSON output https://openrouter.ai/docs/features/structured-outputs
+- Process Ctrl-C with a reasonable completion message and summary
