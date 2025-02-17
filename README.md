@@ -8,7 +8,7 @@ This tool helps you extract specific information from large collections of text 
 - [Key Features](#key-features)
 - [Conceptual Overview](#conceptual-overview)
 - [Example: Vancouver Public Art Explorer](#example)
-- [Tips for Efficient Field Extraction](#tips)
+- [Tips for Efficient Field Extraction (Prompt-Engineering)](#tips)
 - [Models](#models)
 - [Parallel Execution](#parallel-execution)
 - [Command-Line Options](#cli)
@@ -182,7 +182,7 @@ ORDER BY instagramability DESC
 LIMIT 10;
 ```
 
-## <a id="tips"></a>Tips for Efficient Field Extraction
+## <a id="tips"></a>Tips for Efficient Field Extraction (Prompt-Engineering)
 
 ### Use Boolean Markers
 
@@ -230,7 +230,9 @@ When categorizing age groups:
 
 ```yaml
 age_category:
-  description: Classify the age of the speaker into one of the following categories: 0-18, 19-35, 36-50, 51+
+  description: >
+   Classify the age of the speaker into one of the following categories:
+   0-18, 19-35, 36-50, 51+
   format: text
   db_column: age_category
 ```
