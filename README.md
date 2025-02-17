@@ -184,8 +184,9 @@ LIMIT 10;
 
 ## <a id="tips"></a>Tips for Efficient Field Extraction
 
-### Use Boolean Markers for Applicability
-Before extracting a specific label, it's beneficial to first determine if the label is applicable. By configuring the model to assess applicability with a yes/no question, you encourage it to focus on relevant labels and reduce the chance of generating incorrect information.
+### Use Boolean Markers
+
+Before extracting a specific label, it's beneficial to first determine if the label is applicable. By configuring the model to assess applicability with a yes/no question, you encourage it to focus on relevant labels and reduce the chance of generating incorrect information. This approach is also highly useful for subsequent analysis in SQL, as it allows for efficient filtering and querying of data based on the presence or absence of specific attributes.
 
 ### Order Fields Strategically
 LLMs process information in sequence, and this significantly affects their output quality. Every next word it generates becomes an input for next word generation. Research confirms that changing the order of requested fields can dramatically impact accuracy. Use this to your advantage.
@@ -299,10 +300,10 @@ options:
                         Name of the SQLite database file to store results. If not specified, the project name from config.yaml is used.
   --config CONFIG       Path to the YAML configuration file containing extraction parameters.
   --max_failures MAX_FAILURES
-                        Maximum number of failures allowed for a chunk before it's skipped.
+                        Maximum number of failures allowed for a chunk before it is skipped.
   --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
   --provider PROVIDER   Base URL of the LLM provider API (e.g., '[https://api.openrouter.ai/v1](https://api.openrouter.ai/v1)'). Defaults to OpenRouter.
-  
+```
 ## <a id="credits"></a>Credits
 
 Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing small portions. Expect potential code problems. This is an analyst's tool, not professional software. Gemini was also hugely helpful with this document.
