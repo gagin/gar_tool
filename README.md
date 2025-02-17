@@ -191,7 +191,7 @@ Before extracting a specific label, it's beneficial to first determine if the la
 ### Order Fields Strategically
 LLMs process information in sequence, and this significantly affects their output quality. Every next word it generates becomes an input for next word generation. Research confirms that changing the order of requested fields can dramatically impact accuracy. Use this to your advantage.
 
-#### Break Down Complex Labels Into Multiple Fields:
+#### Break Down Complex Labels Into Multiple Fields
 Instead of requesting a single label, consider using multiple related fields that build upon each other. For example, when identifying artwork characteristics, you might want:
 - A boolean flag for presence
 - Supporting evidence (quotes from source)
@@ -199,7 +199,7 @@ Instead of requesting a single label, consider using multiple related fields tha
 
 This multi-field approach helps validate extractions and provides traceable reasoning for downstream analysis.
 
-**Experiment with Field Order**
+#### Experiment with Field Order
 LLMs process information sequentially, and their performance can vary significantly based on field order. While there’s no universal “best” sequence, consider testing different arrangements:
 - Boolean -> Quote -> Label
 - Quote -> Boolean -> Label
