@@ -78,16 +78,16 @@ class ConfigLoader:
 # to overwrite constants
 parser = argparse.ArgumentParser(description="Process data with configurable constants.")
 
-parser.add_argument('--context_window', type=int, help="Context window size - longer file will be cut to chunks.")
-parser.add_argument('--temperature', type=float, help="Temperature for model generation - 0.6 is recommended by DeepSeek, higher means more creativity.")
-parser.add_argument('--debug_sample_length', type=int, help="Length of model response in console for debug.")
-parser.add_argument('--timeout', type=int, help="Timeout for requests to llm.")
-parser.add_argument('--data_folder', type=str, help="Path to the data folder, no trailing slash.")
-parser.add_argument('--results_db', type=str, help="Name of sqlite file with results.")
-parser.add_argument('--config', type=str, default='config.yaml', help="Name of the file with extractor configuration in YAML format.")
-parser.add_argument('--max_failures', type=str, help="Maximum failures for a chunk in this run before it skipped.")
-parser.add_argument('--model', type=str, help="Model name to use for analysis.")
-parser.add_argument('--provider', type=str, help="Base URL for LLM provider, openrouter by default.")
+parser.add_argument('--context_window', type=int, help="Context window size (in tokens). Files exceeding this size will be split into chunks.")
+parser.add_argument('--temperature', type=float, help="Temperature for model generation (0.0 to 1.0). Higher values increase creativity. Defaults to 0 for predictable categorization. DeepSeek recommends 0.6 for more creative tasks.")
+parser.add_argument('--debug_sample_length', type=int, help="Maximum length of model response displayed in the console for debugging.")
+parser.add_argument('--timeout', type=int, help="Timeout (in seconds) for requests to the LLM API.")
+parser.add_argument('--data_folder', type=str, help="Path to the directory containing the text files to process (no trailing slash).")
+parser.add_argument('--results_db', type=str, help="Name of the SQLite database file to store results. If not specified, the project name from config.yaml is used.")
+parser.add_argument('--config', type=str, default='config.yaml', help="Path to the YAML configuration file containing extraction parameters.")
+parser.add_argument('--max_failures', type=int, help="Maximum number of failures allowed for a chunk before it is skipped.")
+parser.add_argument('--model', type=str, help="Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').")
+parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
 
 args = parser.parse_args()
 
