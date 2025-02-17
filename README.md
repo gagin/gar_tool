@@ -208,6 +208,7 @@ LLMs process information sequentially, and their performance can vary significan
 - Boolean -> Label -> Quote
 
 Your optimal sequence may depend on your specific use case, document structure, and model capabilities. Measure accuracy with different orderings on a sample of your data.
+**In my tests, the Quote -> Boolean -> Label (QBL) order seemed to work best.**
 
 #### Consider interplay between fields
 Consider both the order of fields within a single label and the sequence of different labels. For example, when analyzing public art:
@@ -327,3 +328,5 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - The `format` field is now shown to the model, but in the db booleans are still created as TEXT
 - Use structured outputs for supported models instead of manually prompting models for JSON output https://openrouter.ai/docs/features/structured-outputs
 - Process Ctrl-C with a reasonable completion message and summary
+- yaml indentation problems are annoying, should I use JSON for config?
+- Accept a CLI parameter of how to label this batch in the chunk field, so that comparison test between different orders/prompt versions would be easier?
