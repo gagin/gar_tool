@@ -315,4 +315,4 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - Handle model response prefixes, such as "Here's the JSON:"
 - Include default values in the `--help` output
 - Support direct CSV input
-- Clarify `format` field usage
+- The `format` field is now shown to the model, but in the db booleans are still created as TEXT
