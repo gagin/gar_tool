@@ -19,7 +19,7 @@ This tool helps you extract specific information from large collections of text 
 ## <a id="key-features"></a>Key Features
 
 * **Extract Both Explicit and Implicit Data**: Retrieve both clearly defined data (e.g., addresses) and subtle, subjective details inferred from text (e.g., visual appeal ratings).
-* **Single-point Configuration**: Define what to extract and how to store it using a single record in config.yaml. This dual-purpose configuration instructs the LLM and structures the database storage, eliminating the need for separate definitions and making the setup more streamlined.
+* **Single-point Configuration**: Define what to extract and how to store it using a single record in config.yaml. This dual-purpose configuration instructs the LLM and structures the database storage, eliminating the need for separate definitions.
 * **Support for Multiple Models and Providers**: Compatible with various language models and providers, including options for local deployment to suit different needs.
 * **Parallel Processing with Checkpointing**: Process text files in parallel with automatic checkpointing, allowing for interruption and resumption.
 * **SQLite Database Storage**: Store results in an SQLite database for easy analysis and export.
@@ -83,7 +83,8 @@ Coast Salish design depicting salmon and river grass...
 Here's how to extract in our public art example:
 
 ```yaml
-name: public_art_vancouver # This affects how results .db file will be named in the directory you run the script. Can be overridden with a command-line option
+name: public_art_vancouver # This affects how results .db file will be named in the directory 
+                           # you run the script. Can be overridden with a command-line option
 
 ... # Some configuration is omitted here for brevity, as you typically don't need to change it
 
