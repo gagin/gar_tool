@@ -23,6 +23,7 @@ This tool helps you extract specific information from large collections of text 
 * **Support for Multiple Models and Providers**: Compatible with various language models and providers, including options for local deployment to suit different needs.
 * **Parallel Processing with Checkpointing**: Process text files in parallel with automatic checkpointing, allowing for interruption and resumption.
 * **SQLite Database Storage**: Store results in an SQLite database for easy analysis and export.
+* **Test Run Tagging for Comparison**: Add comments via command-line parameter to database entries during testing, allowing for comparison of different configurations and detailed analysis.
 
 ## <a id="conceptual-overview"></a>**Conceptual Overview: Generation Augmented Retrieval (GAR)**
 
