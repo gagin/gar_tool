@@ -7,7 +7,7 @@ defaults:
   temperature: 0
   debug_sample_length: 1500
   timeout: 30
-  data_folder: ./public_art_vancouver
+  data_folder: ./art-G
   max_failures: 1  # Maximum number of failures per chunk
   model: google/gemini-2.0-flash-001:floor
   provider: https://openrouter.ai/api/v1
@@ -27,7 +27,7 @@ nodes:
   is_first_nations_quote:
     description: >
       If this art is related to First Nations, please provide a quote (one sentence length)
-      that supports this
+      that supports this. If it's not related, keep it empty.
     format: text
     db_column: first_nations_quote
     
@@ -42,6 +42,7 @@ nodes:
      It does not matter if it's a local artist and it is installed locally.
      Consider only whether it integrates with local context somehow.
      If it does, please provide a quote (one sentence length) supporting this.
+     Otherwise, keep it empty.
     format: text
     db_column: relevant_quote
       

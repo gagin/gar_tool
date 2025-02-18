@@ -12,6 +12,8 @@ from typing import List, Optional, Dict, Any, Tuple
 from dotenv import load_dotenv
 import requests
 
+VERSION = '0.1.1'
+
 @dataclass
 class ExtractorDefaults:
     context_window: int
@@ -89,6 +91,7 @@ parser.add_argument('--max_failures', type=int, help="Maximum number of failures
 parser.add_argument('--model', type=str, help="Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').")
 parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
 parser.add_argument('--comment', type=str, help="Tags records in the DATA table's 'comment' column with a run label for comparison testing (allows duplication of file+chunk).")
+parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 args = parser.parse_args()
 
 # Load config

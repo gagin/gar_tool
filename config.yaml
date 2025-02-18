@@ -7,7 +7,7 @@ defaults:
   temperature: 0
   debug_sample_length: 1500
   timeout: 30
-  data_folder: ./public_art_vancouver
+  data_folder: ./art-G
   max_failures: 1  # Maximum number of failures per chunk
   model: google/gemini-2.0-flash-001:floor
   provider: https://openrouter.ai/api/v1
