@@ -328,7 +328,7 @@ options:
                         Maximum number of failures allowed for a chunk before it is skipped.
   --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
   --provider PROVIDER   Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.
-  --comment COMMENT     A comment to add to the 'comment' column of the 'DATA' table for this batch. Use it to distinguish and compare results from different runs during testing.
+  --comment COMMENT     Tags records in the DATA table's 'comment' column with a run label for comparison testing (allows duplication of file+chunk).
 ```
 
 ## <a id="trouble"></a>Troubleshooting

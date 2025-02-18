@@ -88,8 +88,7 @@ parser.add_argument('--config', type=str, default='config.yaml', help="Path to t
 parser.add_argument('--max_failures', type=int, help="Maximum number of failures allowed for a chunk before it is skipped.")
 parser.add_argument('--model', type=str, help="Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').")
 parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
-parser.add_argument('--comment', type=str, help="A comment to add to the 'comment' column of the 'DATA' table for this batch. Use it to distinguish and compare results from different runs during testing.")
-
+parser.add_argument('--comment', type=str, help="Tags records in the DATA table's 'comment' column with a run label for comparison testing (allows duplication of file+chunk).")
 args = parser.parse_args()
 
 # Load config
