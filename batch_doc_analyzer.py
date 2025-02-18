@@ -88,6 +88,7 @@ parser.add_argument('--config', type=str, default='config.yaml', help="Path to t
 parser.add_argument('--max_failures', type=int, help="Maximum number of failures allowed for a chunk before it is skipped.")
 parser.add_argument('--model', type=str, help="Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').")
 parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
+parser.add_argument('--comment', type=str, help="A comment to add to the 'comment' column of the 'DATA' table for this batch. Use it to distinguish and compare results from different runs during testing.")
 
 args = parser.parse_args()
 
@@ -179,6 +180,7 @@ class DocumentAnalyzer:
             Column('request_id', 'INTEGER', primary_key=True),
             Column('file', 'TEXT', nullable=False),
             Column('chunknumber', 'INTEGER', nullable=False),
+            Column('comment', 'TEXT', nullable=True)
         ]
         
         for json_node, db_column in self.query_config.db_mapping.items():
@@ -205,9 +207,10 @@ class DocumentAnalyzer:
         }
 
 class Database:
-    def __init__(self, analyzer: DocumentAnalyzer):
+    def __init__(self, analyzer: DocumentAnalyzer, comment: str = None):
         self.analyzer = analyzer
         self.connection = None
+        self.comment = comment  # Store the comment
         
     def connect(self):
         self.connection = sqlite3.connect(self.analyzer.db_path)
@@ -243,25 +246,37 @@ class Database:
         )
         return cursor.fetchone()
     
-    def get_unprocessed_chunks(self, filename: str, results_table: str) -> List[Tuple[str, int]]:
+    def get_unprocessed_chunks(self, filename: str, results_table: str, comment: str = None) -> List[Tuple[str, int]]:
         try:
             cursor = self.connection.cursor()
             results_table = self.analyzer.query_config.results_table
-            sql_query = f'''
-                SELECT c.file, c.chunknumber 
-                FROM FCHUNKS c 
-                LEFT JOIN {results_table} r 
-                    ON c.file = r.file AND c.chunknumber = r.chunknumber
-                WHERE r.file IS NULL AND c.file = ?
-            '''
-            cursor.execute(sql_query, (filename,))
+
+            if comment is not None:
+                # If comment is provided, check for file+chunk+comment duplicates
+                sql_query = f'''
+                    SELECT c.file, c.chunknumber 
+                    FROM FCHUNKS c 
+                    LEFT JOIN {results_table} r 
+                        ON c.file = r.file AND c.chunknumber = r.chunknumber AND r.comment = ?
+                    WHERE r.file IS NULL AND c.file = ?
+                '''
+                cursor.execute(sql_query, (comment, filename,))
+            else:
+                # If no comment, perform the original file+chunk duplicate check
+                sql_query = f'''
+                    SELECT c.file, c.chunknumber 
+                    FROM FCHUNKS c 
+                    LEFT JOIN {results_table} r 
+                        ON c.file = r.file AND c.chunknumber = r.chunknumber
+                    WHERE r.file IS NULL AND c.file = ?
+                '''
+                cursor.execute(sql_query, (filename,))
+
             return cursor.fetchall()
         except sqlite3.OperationalError as e:
             print(f"Database error: {e}")
             print("Make sure the database and tables are properly initialized")
             return []
-
-
     
     def log_request(self, file: str, chunk_number: int, 
                    model: str, result: ProcessingResult) -> int:
@@ -287,6 +302,11 @@ class Database:
             if json_node in data:
                 columns.append(db_column)
                 values.append(data[json_node])
+
+        # Add comment if it exists
+        if self.comment is not None:
+            columns.append('comment')
+            values.append(self.comment)
         
         placeholders = ','.join(['?' for _ in values])
         cursor.execute(
@@ -519,7 +539,7 @@ def main():
                                 results_table=config.results_table
                             ))
 
-    db = Database(analyzer)
+    db = Database(analyzer, args.comment)
     db.connect()  # Make sure this is called
     db.init_tables()  # Make sure this is called to create all necessary tables
 
@@ -539,7 +559,7 @@ def main():
                         chunks = calculate_chunks(full_path)
                         db.insert_chunks(full_path, chunks)
                     
-                    chunks = db.get_unprocessed_chunks(full_path, analyzer.query_config.results_table)
+                    chunks = db.get_unprocessed_chunks(full_path, analyzer.query_config.results_table, args.comment)
                     for chunk in chunks:
                         if not db.get_recent_failures(chunk[0], chunk[1], 
                                                     iso_timestamp, MAX_FAILURES):

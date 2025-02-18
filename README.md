@@ -111,7 +111,7 @@ nodes:
   visually_interesting:
     description: How interesting it looks on scale of 0 to 10, as in being instagrammable
     format: number
-    db_column: instagramability
+    db_column: instagrammability
 ```
 > Note: To handle long strings in YAML, which has a practical line width recommendation of 80 characters, the > character after a node name allows you to write multiple indented lines that are then treated as a single, continuous line. This recommendation helps ensure that YAML content remains easily readable without requiring horizontal scrolling or line wrapping on typical displays.
 > Also, ensure you use consistent indentation (usually spaces are recommended, although I personally prefer tabs), as mixing tabs and spaces or inconsistent spacing will lead to nodes being skipped or misinterpreted.
@@ -154,7 +154,7 @@ prompt_template: |
 ### Results in SQLite
 The data is stored in a SQLite database (`public_art_vancouver.db`):
 
-| name    | address                    | first_nations | first_nations_quote                                      | instagramability |
+| name    | address                    | first_nations | first_nations_quote                                      | instagrammability |
 |---------|----------------------------|---------------|----------------------------------------------------------|------------------|
 | Fusion  | 70th Avenue & Cornish St. | 1             | The sculpture is contemporary yet unmistakably Salish... | 7                |
 
@@ -171,22 +171,24 @@ The data is stored in a SQLite database (`public_art_vancouver.db`):
 
 
 1. Use [DB Browser for SQLite](https://sqlitebrowser.org/) to view and export data as CSV and process in Excel and Google Sheets.
-2. You can overwrite the `Chunk` field in DB Browser with a comment instead of a number (don't forget to click **Write Changes!**).
-    * The script will then treat this file/chunk as unprocessed and run it again.
-    * This allows for comparing results across different models.
+2. You can edit the `comment` field in DB Browser (don't forget to click **Write Changes!**).
+    * This allows you to add or modify comments after the initial processing.
+
 
 You can query the database to find interesting artworks:
 ```sql
-SELECT name, address, instagramability 
+SELECT name, address, instagrammability 
 FROM data 
 WHERE first_nations = 1 
-ORDER BY instagramability DESC 
+ORDER BY instagrammability DESC 
 LIMIT 10;
 ```
 
+**Note on Boolean Comparisons:** Even though boolean values are stored as TEXT in the database, SQLite's dynamic typing allows you to use boolean-like comparisons (e.g., `WHERE first_nations = TRUE`). SQLite may perform implicit type conversions during comparisons.
+
 ## <a id="tips"></a>Tips for Efficient Field Extraction (Prompt-Engineering)
 
-### Use Boolean Markers
+### Use Boolean Markers for Applicability
 
 Before extracting a specific label, it's beneficial to first determine if the label is applicable. By configuring the model to assess applicability with a yes/no question, you encourage it to focus on relevant labels and reduce the chance of generating incorrect information. This approach is also highly useful for subsequent analysis in SQL, as it allows for efficient filtering and querying of data based on the presence or absence of specific attributes.
 
@@ -209,6 +211,22 @@ LLMs process information sequentially, and their performance can vary significan
 
 Your optimal sequence may depend on your specific use case, document structure, and model capabilities. Measure accuracy with different orderings on a sample of your data.
 **In my tests, the Quote -> Boolean -> Label (QBL) order seemed to work best.**
+
+##### Using `--comment` for Comparison Tests
+
+The `--comment` argument allows you to add a comment to each record in the results database. This is particularly useful for comparing the effects of different field orders, models, or prompt variations.
+
+For example, you could run the script multiple times with different configurations, using a unique comment for each run:
+
+```bash
+python batch_doc_analyzer.py --config qbl.yaml --comment "QBL Order" --results_db comparison.db
+python batch_doc_analyzer.py --config blq.yaml --comment "BLQ Order" --results_db comparison.db
+python batch_doc_analyzer.py --config lqb.yaml --comment "LQB Order" --results_db comparison.db
+python batch_doc_analyzer.py --config qbl.yaml --temperature 1 --comment "QBL Temp1" --results_db comparison.db
+```
+**Note:** Ensure that the configuration files (`qbl.yaml`, `blq.yaml`, `lqb.yaml`) have the exact same columns configured. If the columns do not match, the script will fail because the database schema will not be compatible. The `--results_db` argument is used to specify the output database. It is used here to show that the database name can be changed, and that comparison results can be put in a dedicated file. If all the configs have the same project name, this argument is not needed, and the results will be put in a database named after the project.
+
+The script can only create duplicates of the same file and chunk if they have different comments. This allows you to easily compare the results of each run by querying the database using the comment as a filter.
 
 #### Consider interplay between fields
 Consider both the order of fields within a single label and the sequence of different labels. For example, when analyzing public art:
@@ -287,7 +305,7 @@ Here are the available command-line options:
 ```bash
 python batch_doc_analyzer.py --help
 usage: batch_doc_analyzer.py [-h] [--context_window CONTEXT_WINDOW] [--temperature TEMPERATURE] [--debug_sample_length DEBUG_SAMPLE_LENGTH] [--timeout TIMEOUT] [--data_folder DATA_FOLDER] [--results_db RESULTS_DB]
-                            [--config CONFIG] [--max_failures MAX_FAILURES] [--model MODEL] [--provider PROVIDER]
+                             [--config CONFIG] [--max_failures MAX_FAILURES] [--model MODEL] [--provider PROVIDER] [--comment COMMENT]
 
 Process data with configurable constants.
 
@@ -308,7 +326,8 @@ options:
   --max_failures MAX_FAILURES
                         Maximum number of failures allowed for a chunk before it is skipped.
   --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
-  --provider PROVIDER   Base URL of the LLM provider API (e.g., '[https://api.openrouter.ai/v1](https://api.openrouter.ai/v1)'). Defaults to OpenRouter.
+  --provider PROVIDER   Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.
+  --comment COMMENT     A comment to add to the 'comment' column of the 'DATA' table for this batch. Use it to distinguish and compare results from different runs during testing.
 ```
 
 ## <a id="trouble"></a>Troubleshooting
@@ -322,11 +341,10 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 
 ## <a id="to-do"></a>To-Do
 
-- Handle model response prefixes, such as "Here's the JSON:"
-- Include default values in the `--help` output
-- Support direct CSV input
-- The `format` field is now shown to the model, but in the db booleans are still created as TEXT
-- Use structured outputs for supported models instead of manually prompting models for JSON output https://openrouter.ai/docs/features/structured-outputs
-- Process Ctrl-C with a reasonable completion message and summary
-- yaml indentation problems are annoying, should I use JSON for config?
-- Accept a CLI parameter of how to label this batch in the chunk field, so that comparison test between different orders/prompt versions would be easier?
+- **Handle varied model output:** Some models like LLama 70B Nemotron might add prefixes like "Here's the JSON:" to their responses, we could try to handle that. Ideally, we should also explore using [structured outputs](https://platform.openai.com/docs/guides/function-calling) for models that support them for better reliability and potentially fewer tokens / lower cost. Right now, our JSON prompting works and supports more models (including local ones).
+- **Show defaults in `--help`:** Make the `--help` output show default values for command-line options.
+- **Direct CSV input:** Let users input CSV files directly, without needing to convert them to text first.
+- **Booleans as TEXT:** Note that boolean outputs are stored as TEXT in the database, even though we show the model the `format` field. This doesn't break anything, and SQL queries work as expected due to SQLite's dynamic typing, but it's something to be aware of.
+- **Database Schema Type Consistency:** Ensure that the database schema is created using the type declarations from the `config.yaml` file. Currently, all fields are stored as TEXT, even when `format` specifies other types (e.g., number, boolean). While SQLite's dynamic typing allows for some flexibility in queries, maintaining schema consistency will improve data integrity and clarity.
+- **Better Ctrl-C handling:** When someone presses Ctrl-C, give a nice completion message and a summary of what's been processed.
+- **YAML vs. JSON for config:** YAML indentation can be tricky. Should we switch to JSON for the config file?
