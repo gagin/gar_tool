@@ -348,4 +348,4 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - **Booleans as TEXT:** Note that boolean outputs are stored as TEXT in the database, even though we show the model the `format` field. This doesn't break anything, and SQL queries work as expected due to SQLite's dynamic typing, but it's something to be aware of.
 - **Database Schema Type Consistency:** Ensure that the database schema is created using the type declarations from the `config.yaml` file. Currently, all fields are stored as TEXT, even when `format` specifies other types (e.g., number, boolean). While SQLite's dynamic typing allows for some flexibility in queries, maintaining schema consistency will improve data integrity and clarity.
 - **Better Ctrl-C handling:** When someone presses Ctrl-C, give a nice completion message and a summary of what's been processed.
-- **YAML vs. JSON for config:** YAML indentation can be tricky. Should we switch to JSON for the config file?
+- **YAML vs. JSON for config:** YAML indentation is annoying and leads to unexpected behavior (see Troubleshooting). Should we switch to JSON for the config file?
