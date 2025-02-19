@@ -154,7 +154,7 @@ parser.add_argument('--context_window', type=int, help="Context window size (in 
 parser.add_argument('--temperature', type=float, help="Temperature for model generation (0.0 to 1.0). Higher values increase creativity. Defaults to 0 for predictable categorization. DeepSeek recommends 0.6 for more creative tasks.")
 parser.add_argument('--debug_sample_length', type=int, help="Maximum length of model response displayed in the console for debugging.")
 parser.add_argument('--timeout', type=int, help="Timeout (in seconds) for requests to the LLM API.")
-parser.add_argument('--data_folder', type=str, help="Path to the directory containing the text files to process (no trailing slash).")
+parser.add_argument('--data_folder', type=str, help="Path to the directory containing the text files to process.")
 parser.add_argument('--results_db', type=str, help="Name of the SQLite database file to store results. If not specified, the project name from config.yaml is used.")
 parser.add_argument('--config', type=str, default='config.yaml', help="Path to the YAML configuration file containing extraction parameters.")
 parser.add_argument('--max_failures', type=int, help="Maximum number of failures allowed for a chunk before it is skipped.")
@@ -512,6 +512,7 @@ def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
         return None, f"Unexpected error: {e}"
     
 def clean_json_response(response: str) -> str:
+    """Trims JSON response from the model"""
     if not response:
         return response
         
