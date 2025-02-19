@@ -36,12 +36,12 @@ def update_version_file(version_file="batch_doc_analyzer.py"):
 
     if not has_file_changed(version_file):
         print("No changes detected in batch_doc_analyzer.py. Skipping version update.")
-        return
+        return False # Return False if no update
 
     timestamp = get_git_timestamp()
     if timestamp is None:
         print("Error: Could not retrieve Git timestamp.")
-        return
+        return False
 
     with open(version_file, "r") as f:
         lines = f.readlines()
@@ -74,7 +74,7 @@ def update_version_file(version_file="batch_doc_analyzer.py"):
 
                 except ValueError:
                     print("Error: Invalid version format.")
-                    return
+                    return False
             else:
                 updated_lines.append(line)
         else:
@@ -82,12 +82,13 @@ def update_version_file(version_file="batch_doc_analyzer.py"):
 
     if not version_updated:
         print("Error: VERSION constant not found.")
-        return
+        return False
 
     with open(version_file, "w") as f:
         f.writelines(updated_lines)
 
     print(f"Version updated in {version_file}")
+    return True # Return True if updated
 
 if __name__ == "__main__":
     update_version_file()

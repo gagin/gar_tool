@@ -28,7 +28,6 @@ VERSION = '0.1.1'
 class ExtractorDefaults:
     context_window: int
     temperature: float
-    debug_sample_length: int
     timeout: int
     data_folder: str
     max_failures: int
@@ -98,7 +97,6 @@ class ConfigLoader:
             defaults = ExtractorDefaults(
                 context_window=config_data['defaults']['context_window'],
                 temperature=config_data['defaults']['temperature'],
-                debug_sample_length=config_data['defaults']['debug_sample_length'],
                 timeout=config_data['defaults']['timeout'],
                 data_folder=config_data['defaults']['data_folder'],
                 max_failures=config_data['defaults']['max_failures'],
@@ -152,11 +150,11 @@ parser = argparse.ArgumentParser(description="Process data with configurable con
 
 parser.add_argument('--context_window', type=int, help="Context window size (in tokens). Files exceeding this size will be split into chunks.")
 parser.add_argument('--temperature', type=float, help="Temperature for model generation (0.0 to 1.0). Higher values increase creativity. Defaults to 0 for predictable categorization. DeepSeek recommends 0.6 for more creative tasks.")
-parser.add_argument('--debug_sample_length', type=int, help="Maximum length of model response displayed in the console for debugging.")
+parser.add_argument('--llm_debug_excerpt_length', type=int, default=200, help="Maximum length (characters) of LLM response excerpt displayed in debug logs (default: %(default)s).")
 parser.add_argument('--timeout', type=int, help="Timeout (in seconds) for requests to the LLM API.")
 parser.add_argument('--data_folder', type=str, help="Path to the directory containing the text files to process.")
 parser.add_argument('--results_db', type=str, help="Name of the SQLite database file to store results. If not specified, the project name from config.yaml is used.")
-parser.add_argument('--config', type=str, default='config.yaml', help="Path to the YAML configuration file containing extraction parameters.")
+parser.add_argument('--config', type=str, default='config.yaml', help="Path to the YAML configuration file containing extraction parameters (default: %(default)s).")
 parser.add_argument('--max_failures', type=int, help="Maximum number of failures allowed for a chunk before it is skipped.")
 parser.add_argument('--model', type=str, help="Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').")
 parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
@@ -164,13 +162,12 @@ parser.add_argument('--run_tag', type=str, help="Tags records in the DATA table'
 parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 args = parser.parse_args()
 
-# Load config
 config = ConfigLoader.load_config(args.config)
 
-    # Override defaults with command line arguments if provided
+# Override defaults with command line arguments if provided
 CONTEXT_WINDOW = args.context_window or config.defaults.context_window
 TEMPERATURE = args.temperature or config.defaults.temperature
-DEBUG_SAMPLE_LENGTH = args.debug_sample_length or config.defaults.debug_sample_length
+LLM_DEBUG_EXCERPT_LENGTH = args.llm_debug_excerpt_length
 TIMEOUT = args.timeout or config.defaults.timeout
 DATA_FOLDER = args.data_folder or config.defaults.data_folder
 RESULTS_DB = args.results_db or f"{config.name}.db"
@@ -185,6 +182,10 @@ def validate_config():
         raise ValueError(f"Context window must be positive, got {CONTEXT_WINDOW}")
     if TIMEOUT <= 0:
         raise ValueError(f"Timeout must be positive, got {TIMEOUT}")
+    if MAX_FAILURES < 1:
+        raise ValueError("Max failures must be positive number")
+    if MAX_FAILURES > 10:
+        raise ValueError("Doesn't make sense to allow more than 10 failures, edit script if you are certain")
     
 # Load environment variables
 load_dotenv()
@@ -479,7 +480,7 @@ def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
             return None, "Request interrupted after response, during processing"
 
         logging.debug(f"Status code: {response.status_code}")
-        logging.debug(f"Raw response: {response.text.strip()[:DEBUG_SAMPLE_LENGTH]}")
+        logging.debug(f"Raw response: {response.text.strip()[:LLM_DEBUG_EXCERPT_LENGTH]}")
 
         if not response.text.strip():
             return None, ""
@@ -695,7 +696,7 @@ def main():
     logging.info(f"Database: {RESULTS_DB}")
     logging.info(f"Context window: {CONTEXT_WINDOW}")
     logging.info(f"Temperature: {TEMPERATURE}")
-    logging.info(f"Debug sample length: {DEBUG_SAMPLE_LENGTH}")
+    logging.info(f"LLM Excerpt Length: {LLM_DEBUG_EXCERPT_LENGTH}")
     logging.info(f"Timeout: {TIMEOUT}")
     logging.info(f"Data folder: {DATA_FOLDER}")
     logging.info(f"Max failures: {MAX_FAILURES}")
