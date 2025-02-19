@@ -22,7 +22,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-VERSION = '0.1.1' # Last section auto-updated by make 222
+VERSION = '0.1.1' # Last section auto-updated by make 22222
 
 @dataclass
 class ExtractorDefaults:
