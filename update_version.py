@@ -3,9 +3,7 @@ import re
 def update_version_in_file(version_file="batch_doc_analyzer.py"):
     """
     Reads the VERSION constant from a file, increments the last number, and writes it back.
-
-    Args:
-        version_file: The path to the file containing the VERSION constant.
+    Handles single quotes, double quotes, or no quotes around the version string.
     """
     try:
         with open(version_file, "r") as f:
@@ -17,13 +15,13 @@ def update_version_in_file(version_file="batch_doc_analyzer.py"):
     version_updated = False
     updated_lines = []
     for line in lines:
-        match = re.search(r"^(VERSION = '.*?\.)(\d+)'$", line)
+        match = re.search(r"^(VERSION = ['\"]?.*?\.)(\d+)['\"]?$", line)
         if match:
             prefix, patch_version = match.groups()
             try:
                 current_version = int(patch_version)
                 new_version = current_version + 1
-                updated_lines.append(f"{prefix}{new_version}'\n")
+                updated_lines.append(f"{prefix}{new_version}'\n") #always use single quotes when writing
                 version_updated = True
             except ValueError:
                 print("Error: Invalid version format.")
