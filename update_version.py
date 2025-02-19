@@ -15,7 +15,7 @@ def update_version_in_file(version_file="batch_doc_analyzer.py"):
     version_updated = False
     updated_lines = []
     for line in lines:
-        match = re.search(r"^(VERSION = ['\"]?.*?\.)(\d+)['\"]?$", line)
+        match = re.search(r"^(VERSION = ['\"]?.*?\.)(\d+)['\"]?.*$", line)
         if match:
             prefix, patch_version = match.groups()
             try:
