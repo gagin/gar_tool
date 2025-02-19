@@ -24,7 +24,7 @@ def update_version_in_file(version_file="batch_doc_analyzer.py"):
             post_patch_string = match.group(4)
             try:
                 new_patch_number = patch_number + 1
-                updated_lines.append(f"'{pre_patch_string}{new_patch_number}{post_patch_string}'\n")
+                updated_lines.append(f"{pre_patch_string}{new_patch_number}{post_patch_string}\n")
                 version_updated = True
             except ValueError:
                 print("Error: Invalid version format.")

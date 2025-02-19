@@ -22,7 +22,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-'VERSION = '0.1.2' # requires major.minor.patch notation for auto-increment on commits via make xxxxx'
+VERSION = '0.1.3' # requires major.minor.patch notation for auto-increment on commits via make xxxxxx
 
 @dataclass
 class ExtractorDefaults:
