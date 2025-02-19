@@ -1,6 +1,6 @@
-# GAR: Generation Augmented Retrieval Tool
+# GAR: Generation-Augmented Retrieval Tool
 
-This tool helps you extract specific information from large collections of text files and organizes it into a structured database, using Large Language Models (LLMs). Whether you're working with data that was once structured but is now in plain text, or you're seeking to derive new insights from unstructured information, this tool is designed to assist you. Ideal for data analysts and researchers who need to convert unstructured or semi-structured text into analyzable data.
+This command-line tool helps you extract specific information from large collections of text files and organizes it into a spreadsheet in a database, using Large Language Models (LLMs). Whether you're working with data that was once structured but is now in plain text, or you're seeking to derive new insights from unstructured information, this tool is designed to assist you. Ideal for data analysts and researchers who need to convert unstructured or semi-structured text into analyzable data.
 
 #DataExtraction #LLM #RetrievalAugmentedGeneration #AI #NLP #MachineLearning #TextProcessing #DataAnalysis #SQLite #Automation #OpenSource #SemanticParsing
 
@@ -24,6 +24,7 @@ This tool helps you extract specific information from large collections of text 
 * **Parallel Processing with Checkpointing**: Process text files in parallel with automatic checkpointing, allowing for interruption and resumption.
 * **SQLite Database Storage**: Store results in an SQLite database for easy analysis and export.
 * **Test Labelling Capabilities**: Add run tags via command-line parameter to database entries during testing, allowing for comparison of different configurations and detailed analysis.
+* **Simplified Design**: Requires no complex LLM frameworks or Pydantic. Relies solely on Python and the `yaml` library (basic indentation knowledge needed). Prioritizes ease of use compared to feature-rich frameworks lacking ready-to-use solutions.
 
 ## <a id="conceptual-overview"></a>**Conceptual Overview: Generation Augmented Retrieval (GAR)**
 
@@ -394,4 +395,7 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - advisable to have single-doc directory in default config.yaml, and provide full directory via --data_folder to avoid costs on mistakenly triggered runs
 - version_update, pre-commit and install_hooks - don't worry about it unless you change the script and want to have auto-increments to version
 - implement db indexes
+- Note: https://docs.llamaindex.ai/en/stable/understanding/extraction/ provides tooling to call structural outputs, but it's frameworks, not a ready to use solution
+- Very similar solution is implemented at https://extracta.ai/extract-data-from-pdf-to-excel-using-ai/ - but with web UI and pdf support. Upload batch of files, describe fields, see table with extracted results. This tool is preferable to web UI if you want manageable field configuration files and comparison tests.
+- In our approach is document is fed to LLM independently, thus ignoring information that is in commonality between files. For a human eyes, extracting fields from several files will result in next ones being processed faster and with better quality. It unclear though how to technically achieve a similar effect with a model.
 
