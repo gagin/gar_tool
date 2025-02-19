@@ -22,7 +22,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-VERSION = '0.1.4' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.5' # requires major.minor.patch notation for auto-increment on commits via make command
 
 @dataclass
 class ExtractorDefaults:
@@ -296,9 +296,9 @@ class Database:
         if self.connection is None:
             self.connect() #connect so cursor can be created.
             
-        cursor = self.connection.cursor()
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON DATA(file, chunknumber)')
+        #cursor = self.connection.cursor()
+        #cursor.execute('CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)')
+        #cursor.execute('CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON DATA(file, chunknumber)')
         
         return {
             'FCHUNKS': Table(

@@ -370,13 +370,12 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - **Show defaults in `--help`:** Make the `--help` output show default values for command-line options.
 - **Direct CSV input:** Let users input CSV files directly, without needing to convert them to text first.
 - **Database Schema Type Consistency:** Ensure that the database schema is created using the type declarations from the `config.yaml` file. Currently, all fields are stored as TEXT, even when `format` specifies other types (e.g., number, boolean). While SQLite's dynamic typing allows for some flexibility in queries, maintaining schema consistency will improve data integrity and clarity.
-- **Better Ctrl-C handling:** When someone presses Ctrl-C, give a nice completion message and a summary of what's been processed.
 - **YAML vs. JSON for config:** YAML indentation is annoying and leads to unexpected behavior (see Troubleshooting). Should we switch to JSON for the config file?
 - **Default db_column to Node Name:** Make clear that if `db_column` node isn't present, it will not be recorded to `DATA`. But to avoid repeated typing, allow it to be left empty, and then the node name should be used.
 
 ### Unstructured and not thought through notes and ideas on further improvements
 - reordering test - make sure they don't refer to previous ones, e.g.
-- if there are formatting rules for several fields, you can put them to the overall prompt with persona info
+- if there are formatting rules for several fields, you can put them to the overall prompt with persona info (update example according to latest config structure)
 - is required:false used, does it even make sense?
 - should run_tag default to config file name? - yes, and mention in document, that it can also be used, for example, for model names, if these are compared
 - universal value for not found
@@ -384,16 +383,15 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - do i want to keep folder name? additional field without folder name?
 - locked: not even on edit, even on order change
 - implement multi-run with N of M?
-- debug sample - debug excerpt
 - hallicunated amount problem
 - rewrite your prompt with sota models
 - boolean: 1, yes or true
 - explain prompts parts - alternative world, placeholders
 - it'a ok to move common descriptions to generic prompt and not to repeat it in b,q,l
 - investigate Error processing chunk: Invalid \escape: 
-- --version support
 - --structured_output=true/false/test with test is default
 - Ask to do things rather than avoid things
 - advisable to have single-doc directory in default config.yaml, and provide full directory via --data_folder to avoid costs on mistakenly triggered runs
 - version_update, pre-commit and install_hooks - don't worry about it unless you change the script and want to have auto-increments to version
+- implement db indexes
 

@@ -1,12 +1,12 @@
 # Extraction configuration
-name: default # Used as a base name for SQLite file
+name: public_art_vancouver_g # Used as a base name for SQLite file
 
 # LLM configuration defaults, can be overridden by command line parameters
 defaults:
   context_window: 50000
   temperature: 0
   timeout: 30
-  data_folder: ./singlesrc
+  data_folder: ./art-G
   max_failures: 2  # Maximum number of failures per chunk
   model: google/gemini-2.0-flash-001:floor
   provider: https://openrouter.ai/api/v1
@@ -37,11 +37,7 @@ nodes:
 
   is_relevant_quote:
     description: >
-     Is this art Vancouver-specific? Would anything be different if it was somewhere else?
-     It does not matter if it's a local artist and it is installed locally.
-     Consider only whether it integrates with local context somehow.
-     If it does, please provide a quote (one sentence length) supporting this.
-     Otherwise, keep it empty.
+      Provide supporting one-sentence quote of this art is uniquely relevant to Vancouver
     format: text
     db_column: relevant_quote
       
@@ -52,25 +48,67 @@ nodes:
     db_column: relevant
 
   relevance_category:
-    description: >
-      If it is, how would you descibe in one word the reason why it is specific?
-      Capitalize the word, use noun, singular.
+    description: If it is, how would you descibe in one word the reason why it is specific?
     format: boolean
     db_column: relevant_category
 
+  instagrammability_quote:
+    description: Provide exact one-sentence quote from the document which is main reason for instagrammability rating.
+    format: text
+    db_column: insta_quote
+
   visually_interesting:
-    description: >
-      How interesting it looks on scale of 1 to 10, as in being instagrammable.
-      Use full range of possible values, from "a wall" to "fireworks made of flowers".
+    description: Instagrammability rating
     format: number
     db_column: instagrammability
 
 # Prompt template
 prompt_template: |
-  Analyze the files to extract structured case details.        
+  # Overall task
+  Analyze the files to extract structured case details.     
   Return a JSON with the following nodes:
   {node_descriptions}
   Response must be strictly JSON with these exact node names.
+  Ensure the JSON output is valid and correctly formatted. Pay close attention to escape sequences and avoid unnecessary backslashes.
+  Do not add any unneeded escape characters to the output.
+  # Grounding
+  You will be analyzing documents that may contain incomplete or altered information due to privacy measures, including blanked-out sections and placeholders.
+  Use the surrounding context to deduce information, including occupation, even if placeholders are present.
+  However, treat the information specifically replaced by a placeholder as completely unavailable.
+  Do not attempt to guess or infer the value of any placeholder.
+  If the document contains a placeholder, respond with 'n/a' only for the information that the placeholder replaces.
+  Use only the information provided within the document to answer questions.
+  If the answer to a specific value is replaced by a placeholder, respond with 'n/a' for that specific value.
+  If the entire occupational context is replaced by a placeholder, respond with 'n/a' for the occupation.
+  If the occupation can be deduced from the remaining context, provide the deduced occupation.
+  Remember, these documents describe an alternative universe, so disregard real-world knowledge.
+  All similarities to real-world entities are coincidental.
+  Report information that is explicitly stated in the document word for word, except when deducing information or normalizing data.
+  Do not add any information that is not directly in the provided text, except when deducing information or normalizing data.
+  # Definitions
+  ## Relevancy
+  Is this art Vancouver-specific? Would anything be different if it was somewhere else?
+  It does not matter if it's a local artist and it is installed locally.
+  Consider only whether it integrates with local context somehow.
+  ## Instagrammability
+  How interesting it looks on scale of 1 to 10, as in being instagrammable.
+  1 - Repulsive
+  2 - Wouldn't know it's an art piece
+  3 - Mundane
+  4 - Unremarkable
+  5 - Background feature
+  6 - Cute
+  7 - Cool
+  8 - Will probably mention to my friends
+  9 - Must see
+  10 - First thing to visit
+  Use full range of choices.
+  # Language choices
   Any reasoning, explanations, notes, comments should be limited to 50 words and go to notes node.
+  Boolean should be reported as 1 for true, and 0 for false.
+  Content responses like quotes, names, labels and categories should be in original document language.
+  Formal fields like n/a availability should be in English, as well as notes node.
+  For categories, capitalize the word, use noun, singular.
+  # Persona
   Do your best to make subjective choices.
   Treat it as a regular resident of the city with a good visual taste, but no interest in art history.
