@@ -15,6 +15,12 @@ import requests
 import requests.exceptions
 import threading
 import time
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,  # Or logging.DEBUG, logging.WARNING, etc.
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 VERSION = '0.1.1'
 
@@ -40,47 +46,95 @@ class ExtractorConfig:
 
 class ConfigLoader:
     @staticmethod
-    def load_config(config_path: str) -> ExtractorConfig:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config_data = yaml.safe_load(f)
-
-        # Load defaults
-        defaults = ExtractorDefaults(
-            context_window=config_data['defaults']['context_window'],
-            temperature=config_data['defaults']['temperature'],
-            debug_sample_length=config_data['defaults']['debug_sample_length'],
-            timeout=config_data['defaults']['timeout'],
-            data_folder=config_data['defaults']['data_folder'],
-            max_failures=config_data['defaults']['max_failures'],
-            model=config_data['defaults']['model'],
-            provider=config_data['defaults']['provider']
-        )
-
-        # Generate node descriptions for prompt
-        node_descriptions = []
-        db_mapping = {}
-        for name, node in config_data['nodes'].items():
-            description = f"- {name}: {node['description']}"
-            if node.get('format'):
-                description += f" ({node['format']})"
-            node_descriptions.append(description)
+    def validate_config(config_data: Dict[str, Any]) -> None:
+        """Validate configuration parameters"""
+        if not isinstance(config_data, dict):
+            raise ValueError("Configuration must be a dictionary")
             
-            if 'db_column' in node:
-                db_mapping[name] = node['db_column']
+        # Validate required sections
+        required_sections = ['name', 'defaults', 'nodes', 'prompt_template']
+        for section in required_sections:
+            if section not in config_data:
+                raise ValueError(f"Missing required section: {section}")
+        
+        # Validate defaults
+        defaults = config_data['defaults']
+        if not isinstance(defaults, dict):
+            raise ValueError("'defaults' must be a dictionary")
+            
+        # Validate specific default values
+        if not (0 <= defaults.get('temperature', 0) <= 1):
+            raise ValueError("Temperature must be between 0 and 1")
+        if defaults.get('context_window', 0) <= 0:
+            raise ValueError("Context window must be positive")
+        if defaults.get('timeout', 0) <= 0:
+            raise ValueError("Timeout must be positive")
+        if not defaults.get('data_folder'):
+            raise ValueError("Data folder must be specified")
+        if defaults.get('max_failures', 0) < 0:
+            raise ValueError("Max failures must be non-negative")
+            
+        # Validate nodes
+        nodes = config_data['nodes']
+        if not isinstance(nodes, dict):
+            raise ValueError("'nodes' must be a dictionary")
+        for node_name, node_config in nodes.items():
+            if not isinstance(node_config, dict):
+                raise ValueError(f"Node '{node_name}' configuration must be a dictionary")
+            if 'description' not in node_config:
+                raise ValueError(f"Node '{node_name}' missing required 'description' field")
 
-        # Format prompt with node descriptions
-        prompt = config_data['prompt_template'].format(
-            node_descriptions='\n'.join(node_descriptions)
-        )
+    @staticmethod
+    def load_config(config_path: str) -> ExtractorConfig:
+        """Load and validate configuration from YAML file"""
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = yaml.safe_load(f)
+            
+            # Validate configuration
+            ConfigLoader.validate_config(config_data)
+            
+            # Load defaults
+            defaults = ExtractorDefaults(
+                context_window=config_data['defaults']['context_window'],
+                temperature=config_data['defaults']['temperature'],
+                debug_sample_length=config_data['defaults']['debug_sample_length'],
+                timeout=config_data['defaults']['timeout'],
+                data_folder=config_data['defaults']['data_folder'],
+                max_failures=config_data['defaults']['max_failures'],
+                model=config_data['defaults']['model'],
+                provider=config_data['defaults']['provider']
+            )
 
-        # Create config object
-        return ExtractorConfig(
-            name=config_data['name'],
-            defaults=defaults,
-            prompt=prompt,
-            expected_json_nodes=list(config_data['nodes'].keys()),
-            db_mapping=db_mapping
-        )
+            # Generate node descriptions for prompt
+            node_descriptions = []
+            db_mapping = {}
+            for name, node in config_data['nodes'].items():
+                description = f"- {name}: {node['description']}"
+                if node.get('format'):
+                    description += f" ({node['format']})"
+                node_descriptions.append(description)
+                
+                if 'db_column' in node:
+                    db_mapping[name] = node['db_column']
+
+            # Format prompt with node descriptions
+            prompt = config_data['prompt_template'].format(
+                node_descriptions='\n'.join(node_descriptions)
+            )
+
+            return ExtractorConfig(
+                name=config_data['name'],
+                defaults=defaults,
+                prompt=prompt,
+                expected_json_nodes=list(config_data['nodes'].keys()),
+                db_mapping=db_mapping
+            )
+            
+        except FileNotFoundError:
+            raise ValueError(f"Configuration file not found: {config_path}")
+        except yaml.YAMLError as e:
+            raise ValueError(f"Invalid YAML in configuration file: {e}")
 
 def check_duplicate_args(argv): # Checks for duplicate named arguments and exits with an error if found.
     seen_args = set()
@@ -88,7 +142,7 @@ def check_duplicate_args(argv): # Checks for duplicate named arguments and exits
     for arg in argv[1:]:  # Start from index 1 to skip the script name
         if arg.startswith('--'):  # Named argument
             if arg in seen_args:
-                print(f"Error: Duplicate argument '{arg}' found.")
+                logging.error(f"Error: Duplicate argument '{arg}' found.")
                 sys.exit(1)  # Exit with an error code
             else:
                 seen_args.add(arg)
@@ -124,6 +178,14 @@ MAX_FAILURES = args.max_failures or config.defaults.max_failures
 MODEL = args.model or config.defaults.model
 PROVIDER = args.provider or config.defaults.provider
 
+def validate_config():
+    if TEMPERATURE < 0 or TEMPERATURE > 1:
+        raise ValueError(f"Temperature must be between 0 and 1, got {TEMPERATURE}")
+    if CONTEXT_WINDOW <= 0:
+        raise ValueError(f"Context window must be positive, got {CONTEXT_WINDOW}")
+    if TIMEOUT <= 0:
+        raise ValueError(f"Timeout must be positive, got {TIMEOUT}")
+    
 # Load environment variables
 load_dotenv()
 
@@ -180,8 +242,34 @@ class DocumentAnalyzer:
     def __init__(self, db_path: str, query_config: ExtractorConfig):
         self.db_path = db_path
         self.query_config = query_config
-        self.schema = self._create_schema()
+
+class Database:
+    def __init__(self, analyzer: DocumentAnalyzer, run_tag: str = None):
+        self.analyzer = analyzer
+        self.run_tag = run_tag
+        self.connection = None
+        self.schema = self._create_schema() #Create schema here.
+
+    def __enter__(self):
+        self.connect()
+        self.init_tables()
+        return self
         
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.connection:
+            self.connection.close()
+            self.connection = None
+            
+    def connect(self):
+        self.connection = sqlite3.connect(self.analyzer.db_path)
+        return self.connection
+        
+    def init_tables(self):
+        cursor = self.connection.cursor()
+        for table in self.schema.values():
+            cursor.execute(table.get_create_statement())
+        self.connection.commit()
+    
     def _create_schema(self) -> Dict[str, Table]:
         request_log_columns = [
             Column('id', 'INTEGER', primary_key=True),
@@ -201,8 +289,15 @@ class DocumentAnalyzer:
             Column('run_tag', 'TEXT', nullable=True)
         ]
         
-        for json_node, db_column in self.query_config.db_mapping.items():
+        for json_node, db_column in self.analyzer.query_config.db_mapping.items():
             results_columns.append(Column(db_column, 'TEXT'))
+        
+        if self.connection is None:
+            self.connect() #connect so cursor can be created.
+            
+        cursor = self.connection.cursor()
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON DATA(file, chunknumber)')
         
         return {
             'FCHUNKS': Table(
@@ -223,22 +318,6 @@ class DocumentAnalyzer:
                 columns=results_columns
             )
         }
-
-class Database:
-    def __init__(self, analyzer: DocumentAnalyzer, run_tag: str = None):
-        self.analyzer = analyzer
-        self.connection = None
-        self.run_tag = run_tag  # Store the run_tag
-        
-    def connect(self):
-        self.connection = sqlite3.connect(self.analyzer.db_path)
-        return self.connection
-        
-    def init_tables(self):
-        cursor = self.connection.cursor()
-        for table in self.analyzer.schema.values():
-            cursor.execute(table.get_create_statement())
-        self.connection.commit()
     
     def chunk_exists(self, filename: str) -> bool:
         cursor = self.connection.cursor()
@@ -306,8 +385,7 @@ class Database:
 
             return cursor.fetchall()
         except sqlite3.OperationalError as e:
-            print(f"Database error: {e}")
-            print("Make sure the database and tables are properly initialized")
+            logging.exception(f"Database error: {e}")
             return []
     
     def log_request(self, file: str, chunk_number: int, 
@@ -369,90 +447,70 @@ class Database:
         return cursor.fetchall()
 
 def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
-
     global signal_received
     if signal_received:
         return None, "Request skipped due to interrupt."
     
-    def api_call_thread(content, prompt, result_container):
-        try:
-            headers = {
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
-            }
-
-            data = {
-                "model": MODEL,
-                "messages": [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": content}
-                ],
-                "temperature": TEMPERATURE
-            }
-
-            response = requests.post(
-                f"{PROVIDER}/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=TIMEOUT
-            )
-
-            response.raise_for_status()
-
-            if signal_received:
-                result_container["result"] = (None, "Request interrupted after response, during processing")
-                return
-
-            print(f"Status code: {response.status_code}")
-            print(f"Raw response: {response.text.strip()[:DEBUG_SAMPLE_LENGTH]}")
-
-            if not response.text.strip():
-                print("Empty response received from API")
-                result_container["result"] = (None, "")
-                return
-
-            response_data = response.json()
-
-            if 'choices' not in response_data or not response_data['choices']:
-                print("No choices in response")
-                result_container["result"] = (None, json.dumps(response_data))
-                return
-
-            choice = response_data['choices'][0]
-            if 'message' not in choice or 'content' not in choice['message']:
-                print("No message content in response")
-                result_container["result"] = (None, json.dumps(response_data))
-                return
-
-            result_container["result"] = (choice['message']['content'], json.dumps(response_data))
-
-        except requests.exceptions.RequestException as e:
-            result_container["result"] = (None, str(e))
-        except json.JSONDecodeError as e:
-            result_container["result"] = (None, f"JSON Decode Error: {str(e)}")
-        except KeyError as e:
-            result_container["result"] = (None, f"KeyError: {str(e)}")
-        except Exception as e:
-            result_container["result"] = (None, str(e))
-
-
-    result_container = {}  # Dictionary to store the result
-    thread = threading.Thread(target=api_call_thread, args=(content, prompt, result_container))
-    thread.start()
-
     try:
-        thread.join(timeout=TIMEOUT + 1)  # Allow a small buffer for timeout
-    except KeyboardInterrupt:
-        signal_received = True  # Set the flag
-        print("API call interrupted by user.")
-        return None, "API call interrupted by user."
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": content}
+            ],
+            "temperature": TEMPERATURE
+        }
+
+        response = requests.post(
+            f"{PROVIDER}/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=TIMEOUT
+        )
+
+        response.raise_for_status()
+
+        if signal_received:
+            return None, "Request interrupted after response, during processing"
+
+        logging.debug(f"Status code: {response.status_code}")
+        logging.debug(f"Raw response: {response.text.strip()[:DEBUG_SAMPLE_LENGTH]}")
+
+        if not response.text.strip():
+            return None, ""
+
+        response_data = response.json()
+
+        if 'choices' not in response_data or not response_data['choices']:
+            return None, json.dumps(response_data)
+
+        choice = response_data['choices'][0]
+        if 'message' not in choice or 'content' not in choice['message']:
+            return None, json.dumps(response_data)
+
+        return choice['message']['content'], json.dumps(response_data)
+
+    except requests.exceptions.RequestException as e:
+        logging.exception(f"Error making request to {PROVIDER}: {e}")
+        return None, f"Request error: {e}"
+    except json.JSONDecodeError as e:
+        logging.exception(f"Error decoding JSON response: {e}")
+        return None, f"JSON decode error: {e}"
+    except KeyError as e:
+        logging.exception(f"KeyError in JSON response: {e}")
+        return None, f"Key error: {e}"
+    except requests.exceptions.HTTPError as e:
+        logging.exception(f"HTTP Error: {e}")
+        return None, f"HTTP Error: {e}"
+    except Exception as e:
+        logging.exception(f"Unexpected error: {e}")
+        return None, f"Unexpected error: {e}"
     
-    if thread.is_alive():
-        # Thread timed out or was interrupted
-        return None, "API call timed out or interrupted."
-
-    return result_container.get("result", (None, "Thread did not return a result"))
-
 def clean_json_response(response: str) -> str:
     if not response:
         return response
@@ -464,8 +522,15 @@ def clean_json_response(response: str) -> str:
     return response.strip()
 
 def calculate_chunks(filename: str) -> List[Tuple[int, int]]:
-    with open(filename, 'r', encoding='utf-8') as file:
-        content = file.read()
+    try:
+        with open(filename, 'r', encoding='utf-8') as file:
+            content = file.read()
+    except UnicodeDecodeError:
+        logging.exception(f"File {filename} is not valid UTF-8")
+        raise
+    
+    if not content:
+        return []
     
     if len(content) <= CONTEXT_WINDOW:
         return [(0, len(content))]  # Single chunk if it fits
@@ -541,8 +606,7 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
                     request_id, filename, chunk_number, result.extracted_data
                 )
             except sqlite3.OperationalError as e:
-                print(f"Error storing results: {e}. Check the DATA table schema.")
-                print(f"File: {filename}, Chunk: {chunk_number}")
+                logging.error(f"Error storing results: {e}. Check the DATA table schema. File: {filename}, Chunk: {chunk_number}")
                 raise  # Or sys.exit(1) to terminate
 
         return result.success
@@ -584,7 +648,7 @@ def get_run_summary(db_instance, start_iso, end_iso, max_failures):
                            (start_iso, end_iso))
             successes = cursor.fetchone()[0]
 
-            summary += f"\nLLM calls made: {llm_calls}\nSuccessful data extractions: {successes}"
+            summary += f"\nSuccessful data extractions: {successes} out of {llm_calls} LLM calls"
 
         else:
             summary += "\nDatabase not initialized or connection closed."
@@ -601,20 +665,19 @@ def get_run_summary(db_instance, start_iso, end_iso, max_failures):
     return summary
 
 def signal_handler(sig, frame, db_instance, start_iso):
-    print("Signal handler called!")  # Add this line
     """Handles Ctrl+C interrupt and prints a graceful message with stats."""
     global signal_received
     signal_received = True
-    print('\nCtrl+C detected. Gracefully exiting...')
+    logging.info('\nCtrl+C detected. Gracefully exiting...')
     end_iso = get_current_timestamp_iso()
 
     try:
         if db_instance and db_instance.connection:
-            print(get_run_summary(db_instance, start_iso, end_iso, MAX_FAILURES))
+            logging.info(get_run_summary(db_instance, start_iso, end_iso, MAX_FAILURES))
         else:
-            print("Database not initialized or connection closed.")
+            logging.error("Database not initialized or connection closed.")
     except Exception as e:
-        print(f"Error in signal handler: {e}")
+        logging.exception(f"Error in signal handler: {e}")
 
     if db_instance and db_instance.connection:
         db_instance.close()
@@ -622,83 +685,78 @@ def signal_handler(sig, frame, db_instance, start_iso):
     sys.exit(0)
     
 def main():
-    
     global signal_received
     start_iso = get_current_timestamp_iso()
 
-    print(f"Start run at UTC {start_iso}")
-    print("Using configuration:")
-    print(f"Database: {RESULTS_DB}")
-    print(f"Context window: {CONTEXT_WINDOW}")
-    print(f"Temperature: {TEMPERATURE}")
-    print(f"Debug sample length: {DEBUG_SAMPLE_LENGTH}")
-    print(f"Timeout: {TIMEOUT}")
-    print(f"Data folder: {DATA_FOLDER}")
-    print(f"Max failures: {MAX_FAILURES}")
-    print(f"Model: {MODEL}")
+    logging.info(f"Start run at UTC {start_iso}")
+    logging.info("Using configuration:")
+    logging.info(f"Database: {RESULTS_DB}")
+    logging.info(f"Context window: {CONTEXT_WINDOW}")
+    logging.info(f"Temperature: {TEMPERATURE}")
+    logging.info(f"Debug sample length: {DEBUG_SAMPLE_LENGTH}")
+    logging.info(f"Timeout: {TIMEOUT}")
+    logging.info(f"Data folder: {DATA_FOLDER}")
+    logging.info(f"Max failures: {MAX_FAILURES}")
+    logging.info(f"Model: {MODEL}")
 
-    # Your script's logic here, using the configured constants...
-    if os.path.exists(DATA_FOLDER):
-        print("Data folder exists")
-    else:
-        print("Data folder does not exist")
-    
-    analyzer = DocumentAnalyzer(RESULTS_DB,
-                            ExtractorConfig(
-                                name=config.name,
-                                prompt=config.prompt,
-                                defaults=config.defaults,
-                                expected_json_nodes=config.expected_json_nodes,
-                                db_mapping=config.db_mapping,
-                                results_table=config.results_table
-                            ))
+    if not os.path.exists(DATA_FOLDER):
+        logging.error("Data folder does not exist")
+        return
 
-    db = Database(analyzer, args.run_tag)
-    db.connect()  # Make sure this is called
-    db.init_tables()  # Make sure this is called to create all necessary tables
+    analyzer = DocumentAnalyzer(
+        RESULTS_DB,
+        ExtractorConfig(
+            name=config.name,
+            prompt=config.prompt,
+            defaults=config.defaults,
+            expected_json_nodes=config.expected_json_nodes,
+            db_mapping=config.db_mapping,
+            results_table=config.results_table
+        )
+    )
 
-    signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
-    
-    try:
-        while True:
-            files = [f for f in os.listdir(DATA_FOLDER)
-                    if os.path.isfile(os.path.join(DATA_FOLDER, f))]
+    with Database(analyzer, args.run_tag) as db:
+        signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
+        
+        try:
+            while True:
+                files = [f for f in os.listdir(DATA_FOLDER)
+                        if os.path.isfile(os.path.join(DATA_FOLDER, f))]
 
-            unprocessed = []
-            for file in files:
-                full_path = os.path.join(DATA_FOLDER, file)
+                unprocessed = []
+                for file in files:
+                    full_path = os.path.join(DATA_FOLDER, file)
 
-                if not db.chunk_exists(full_path):
-                    chunks = calculate_chunks(full_path)
-                    db.insert_chunks(full_path, chunks)
+                    if not db.chunk_exists(full_path):
+                        chunks = calculate_chunks(full_path)
+                        db.insert_chunks(full_path, chunks)
 
-                chunks = db.get_unprocessed_chunks(full_path, analyzer.query_config.results_table, start_iso, MAX_FAILURES, args.run_tag)
-                for chunk in chunks:
-                    unprocessed.append(chunk)
+                    chunks = db.get_unprocessed_chunks(
+                        full_path, 
+                        analyzer.query_config.results_table, 
+                        start_iso, 
+                        MAX_FAILURES, 
+                        args.run_tag
+                    )
+                    unprocessed.extend(chunks)
 
-            if not unprocessed:
-                print("\nAll chunks processed or skipped!")
-                break
+                if not unprocessed:
+                    logging.info("\nAll chunks processed or skipped!")
+                    break
 
-            file, chunk_number = random.choice(unprocessed)
-            print(f"Processing {file} chunk {chunk_number}")
+                file, chunk_number = random.choice(unprocessed)
+                logging.info(f"Processing {file} chunk {chunk_number}")
 
-            process_chunk(db, file, chunk_number)
+                process_chunk(db, file, chunk_number)
 
-            if signal_received:
-                print("Loop interrupted by user.")
-                break
+                if signal_received:
+                    logging.info("Loop interrupted by user.")
+                    break
 
-    finally:
-        end_iso = get_current_timestamp_iso()
-        if not signal_received:
-            print(get_run_summary(db, start_iso, end_iso, MAX_FAILURES))
-        db.close()
-
-
-    
-
-
+        finally:
+            end_iso = get_current_timestamp_iso()
+            if not signal_received:
+                logging.info(get_run_summary(db, start_iso, end_iso, MAX_FAILURES))
 
 if __name__ == "__main__":
     main()
