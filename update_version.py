@@ -19,8 +19,8 @@ def update_version_in_file(version_file="batch_doc_analyzer.py"):
         match = re.search(r"^(VERSION\s*=\s*['\"]?(\d+\.\d+\.)(\d+)(['\"]?\s*.*?))$", line)
         if match:
             pre_patch_string = match.group(1)
-            patch_number = int(match.group(3)) #Changed to group(3)
-            post_patch_string = match.group(4)
+            patch_number = int(match.group(2))
+            post_patch_string = match.group(3)
             try:
                 new_patch_number = patch_number + 1
                 updated_lines.append(f"VERSION = '{pre_patch_string}{new_patch_number}{post_patch_string}'\n")
