@@ -691,6 +691,7 @@ def main():
     global signal_received
     start_iso = get_current_timestamp_iso()
 
+    logging.info("Welcome! Check README at Github for useful prompt engineering tips")
     logging.info(f"Start run at UTC {start_iso}")
     logging.info("Using configuration:")
     logging.info(f"Database: {RESULTS_DB}")
