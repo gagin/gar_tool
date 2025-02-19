@@ -1,50 +1,42 @@
 import re
 
-def update_version_in_file(version_file="batch_doc_analyzer.py"):
+def update_version_from_string(version_string):
     """
-    Reads the VERSION constant from a file, increments the last number, and writes it back.
-    Handles single quotes, double quotes, or no quotes around the version string, and comments.
+    Extracts the version number from a string and increments it.
+
+    Args:
+        version_string: The string containing the VERSION constant. 
+                        Supports various formats:
+                        - "VERSION = 'X.Y.Z'"
+                        - "VERSION = \"X.Y.Z\""
+                        - "VERSION = X.Y.Z"
+
+    Returns:
+        The updated version string, or None if the version could not be extracted or incremented.
     """
     try:
-        with open(version_file, "r") as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        print(f"Error: File '{version_file}' not found.")
-        return False
-
-    version_updated = False
-    updated_lines = []
-    for line in lines:
-        match = re.search(r"^(VERSION\s*=\s*['\"]?(\d+\.\d+\.)(\d+)['\"]?\s*)(#.*)?$", line)
+        match = re.search(r"VERSION\s*=\s*['\"]?(\d+\.\d+\.)(\d+)['\"]?\s*(#.*)?$", version_string)
         if match:
-            prefix = match.group(1)
-            patch_version = int(match.group(3))
-            comment = match.group(4)
-            try:
-                new_version = patch_version + 1
-                if comment:
-                    updated_lines.append(f"{prefix}{new_version}' {comment}\n")
-                else:
-                    updated_lines.append(f"{prefix}{new_version}'\n")
-                version_updated = True
-            except ValueError:
-                print("Error: Invalid version format.")
-                return False
+            prefix = match.group(1) #get the prefix, for example 0.1.
+            patch = int(match.group(2)) #get the patch number as an integer.
+            new_patch = patch + 1
+            new_version = f"{prefix}{new_patch}" #create the new version string
+            if match.group(3):
+                return f"VERSION = '{new_version}' {match.group(3)}" 
+            else:
+                return f"VERSION = '{new_version}'" 
         else:
-            updated_lines.append(line)
+            print("Error: Could not find VERSION in the string.")
+            return None
+    except Exception as e:
+        print(f"Error: An error occurred while updating the version: {e}")
+        return None
 
-    if not version_updated:
-        print("Error: VERSION constant not found.")
-        return False
+# Example Usage:
+version_string = "VERSION = '0.1.1' # Last section auto-updated by make 22222212"
+updated_version_string = update_version_from_string(version_string)
 
-    try:
-        with open(version_file, "w") as f:
-            f.writelines(updated_lines)
-        print(f"Version updated in {version_file}")
-        return True
-    except IOError:
-        print(f"Error: Could not write to file '{version_file}'.")
-        return False
-
-if __name__ == "__main__":
-    update_version_in_file()
+if updated_version_string:
+    print(f"Updated version: {updated_version_string}")
+else:
+    print("Version update failed.")
