@@ -1,1 +1,19 @@
-.git/hooks/pre-commit
+#!/bin/sh
+
+# Check if batch_doc_analyzer.py has any changes (staged or unstaged)
+if git diff --quiet HEAD batch_doc_analyzer.py; then
+    # Exit code 0: No changes
+    echo "Hook: No changes detected in batch_doc_analyzer.py. Skipping version update."
+    exit 0
+else
+    # Exit code 1: Changes detected
+    if python update_version.py; then
+        # Add the updated version file to the staging area
+        git add batch_doc_analyzer.py
+        echo "Hook: Version updated and staged."
+        exit 0
+    else
+        echo "Hook: Version update script failed."
+        exit 1 # Non-zero exit code to indicate failure
+    fi
+fi
