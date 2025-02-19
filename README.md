@@ -395,4 +395,5 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - --structured_output=true/false/test with test is default
 - Ask to do things rather than avoid things
 - advisable to have single-doc directory in default config.yaml, and provide full directory via --data_folder to avoid costs on mistakenly triggered runs
+- version_update, pre-commit and install_hooks - don't worry about it unless you change the script and want to have auto-increments to version
 
