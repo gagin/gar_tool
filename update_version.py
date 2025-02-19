@@ -22,7 +22,7 @@ def has_file_changed(file_path):
     """Checks if the given file has unstaged changes."""
     try:
         process = subprocess.Popen(
-            ["git", "diff", "--quiet", file_path],
+            ["git", "diff", "--quiet", "HEAD", file_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -35,7 +35,7 @@ def update_version_file(version_file="batch_doc_analyzer.py"):
     """Updates the last numerical section of the VERSION constant."""
 
     if not has_file_changed(version_file):
-        print("No changes detected in batch_doc_analyzer.py. Skipping version update.")
+        print("Version update script: No changes detected in batch_doc_analyzer.py. Skipping version update.")
         return False
 
     timestamp = get_git_timestamp()
