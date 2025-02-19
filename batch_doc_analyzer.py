@@ -558,6 +558,7 @@ def get_chunk_content(filename: str, chunk_bounds: Tuple[int, int]) -> str:
         return content[chunk_bounds[0]:chunk_bounds[1]]
 
 def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
+    """Invokes LLM call function and stores results"""
     chunk_bounds = db.get_chunk_bounds(filename, chunk_number)
     if not chunk_bounds:
         return False
