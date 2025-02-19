@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import signal
 import sys
 import yaml
 import argparse
@@ -11,6 +12,9 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple
 from dotenv import load_dotenv
 import requests
+import requests.exceptions
+import threading
+import time
 
 VERSION = '0.1.1'
 
@@ -77,7 +81,19 @@ class ConfigLoader:
             expected_json_nodes=list(config_data['nodes'].keys()),
             db_mapping=db_mapping
         )
-# to overwrite constants
+
+def check_duplicate_args(argv): # Checks for duplicate named arguments and exits with an error if found.
+    seen_args = set()
+
+    for arg in argv[1:]:  # Start from index 1 to skip the script name
+        if arg.startswith('--'):  # Named argument
+            if arg in seen_args:
+                print(f"Error: Duplicate argument '{arg}' found.")
+                sys.exit(1)  # Exit with an error code
+            else:
+                seen_args.add(arg)
+
+check_duplicate_args(sys.argv)
 parser = argparse.ArgumentParser(description="Process data with configurable constants.")
 
 parser.add_argument('--context_window', type=int, help="Context window size (in tokens). Files exceeding this size will be split into chunks.")
@@ -90,7 +106,7 @@ parser.add_argument('--config', type=str, default='config.yaml', help="Path to t
 parser.add_argument('--max_failures', type=int, help="Maximum number of failures allowed for a chunk before it is skipped.")
 parser.add_argument('--model', type=str, help="Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').")
 parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
-parser.add_argument('--comment', type=str, help="Tags records in the DATA table's 'comment' column with a run label for comparison testing (allows duplication of file+chunk).")
+parser.add_argument('--run_tag', type=str, help="Tags records in the DATA table's 'run_tag' column with a run label for comparison testing (allows duplication of file+chunk).")
 parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 args = parser.parse_args()
 
@@ -182,7 +198,7 @@ class DocumentAnalyzer:
             Column('request_id', 'INTEGER', primary_key=True),
             Column('file', 'TEXT', nullable=False),
             Column('chunknumber', 'INTEGER', nullable=False),
-            Column('comment', 'TEXT', nullable=True)
+            Column('run_tag', 'TEXT', nullable=True)
         ]
         
         for json_node, db_column in self.query_config.db_mapping.items():
@@ -209,10 +225,10 @@ class DocumentAnalyzer:
         }
 
 class Database:
-    def __init__(self, analyzer: DocumentAnalyzer, comment: str = None):
+    def __init__(self, analyzer: DocumentAnalyzer, run_tag: str = None):
         self.analyzer = analyzer
         self.connection = None
-        self.comment = comment  # Store the comment
+        self.run_tag = run_tag  # Store the run_tag
         
     def connect(self):
         self.connection = sqlite3.connect(self.analyzer.db_path)
@@ -248,31 +264,45 @@ class Database:
         )
         return cursor.fetchone()
     
-    def get_unprocessed_chunks(self, filename: str, results_table: str, comment: str = None) -> List[Tuple[str, int]]:
+    def get_unprocessed_chunks(self, filename: str, results_table: str, start_iso: datetime, max_failures: int, run_tag: str = None) -> List[Tuple[str, int]]:
         try:
             cursor = self.connection.cursor()
             results_table = self.analyzer.query_config.results_table
 
-            if comment is not None:
-                # If comment is provided, check for file+chunk+comment duplicates
+            if run_tag is not None:
+                # If run_tag is provided, check for file+chunk+run_tag duplicates and failure counts
                 sql_query = f'''
-                    SELECT c.file, c.chunknumber 
-                    FROM FCHUNKS c 
-                    LEFT JOIN {results_table} r 
-                        ON c.file = r.file AND c.chunknumber = r.chunknumber AND r.comment = ?
+                    SELECT c.file, c.chunknumber
+                    FROM FCHUNKS c
+                    LEFT JOIN {results_table} r
+                        ON c.file = r.file AND c.chunknumber = r.chunknumber AND r.run_tag = ?
                     WHERE r.file IS NULL AND c.file = ?
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM REQUEST_LOG rl
+                        WHERE rl.file = c.file AND rl.chunknumber = c.chunknumber AND rl.success = 0 AND rl.timestamp > ?
+                        GROUP BY rl.file, rl.chunknumber
+                        HAVING COUNT(*) >= ?
+                    )
                 '''
-                cursor.execute(sql_query, (comment, filename,))
+                cursor.execute(sql_query, (run_tag, filename, start_iso, max_failures))
             else:
-                # If no comment, perform the original file+chunk duplicate check
+                # If no run_tag, perform the original file+chunk duplicate check and failure counts
                 sql_query = f'''
-                    SELECT c.file, c.chunknumber 
-                    FROM FCHUNKS c 
-                    LEFT JOIN {results_table} r 
+                    SELECT c.file, c.chunknumber
+                    FROM FCHUNKS c
+                    LEFT JOIN {results_table} r
                         ON c.file = r.file AND c.chunknumber = r.chunknumber
                     WHERE r.file IS NULL AND c.file = ?
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM REQUEST_LOG rl
+                        WHERE rl.file = c.file AND rl.chunknumber = c.chunknumber AND rl.success = 0 AND rl.timestamp > ?
+                        GROUP BY rl.file, rl.chunknumber
+                        HAVING COUNT(*) >= ?
+                    )
                 '''
-                cursor.execute(sql_query, (filename,))
+                cursor.execute(sql_query, (filename, start_iso, max_failures))
 
             return cursor.fetchall()
         except sqlite3.OperationalError as e:
@@ -305,10 +335,10 @@ class Database:
                 columns.append(db_column)
                 values.append(data[json_node])
 
-        # Add comment if it exists
-        if self.comment is not None:
-            columns.append('comment')
-            values.append(self.comment)
+        # Add run_tag if it exists
+        if self.run_tag is not None:
+            columns.append('run_tag')
+            values.append(self.run_tag)
         
         placeholders = ','.join(['?' for _ in values])
         cursor.execute(
@@ -323,90 +353,105 @@ class Database:
             self.connection.close()
             self.connection = None
 
-    def get_recent_failures(self, filename: str, chunk_number: int, 
-                        window_start_iso: datetime, max_failures: int) -> bool:
-        """
-        Check if chunk has had too many failures in recent time window
-        Returns True if chunk should be skipped
-        """
+    def get_all_skipped_chunks_for_run(self, start_iso: datetime, end_iso: datetime, max_failures: int) -> List[Tuple[str, int]]:
+        """Get all chunks that are currently in failure timeout for a specific run."""
         cursor = self.connection.cursor()
-        
-        cursor.execute('''
-            SELECT COUNT(*) 
-            FROM REQUEST_LOG 
-            WHERE file = ? 
-            AND chunknumber = ? 
-            AND success = 0
-            AND timestamp > ?
-            ''', (filename, chunk_number, window_start_iso))
-        
-        failure_count = cursor.fetchone()[0]
-        #print(f"Skip count for chunk {chunk_number} of {filename}: {failure_count}")
-        return failure_count >= max_failures
 
-    def get_all_skipped_chunks(self, window_start_iso: datetime, max_failures: int) -> List[Tuple[str, int]]:
-        """Get all chunks that are currently in failure timeout"""
-        cursor = self.connection.cursor()
-        
         cursor.execute('''
             SELECT file, chunknumber, COUNT(*) as failures
-            FROM REQUEST_LOG 
-            WHERE success = 0 
-            AND timestamp > ?
+            FROM REQUEST_LOG
+            WHERE success = 0
+            AND timestamp >= ? AND timestamp <= ?
             GROUP BY file, chunknumber
             HAVING failures >= ?
-            ''', (window_start_iso, max_failures))
-        
+            ''', (start_iso, end_iso, max_failures))
+
         return cursor.fetchall()
 
 def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
+
+    global signal_received
+    if signal_received:
+        return None, "Request skipped due to interrupt."
+    
+    def api_call_thread(content, prompt, result_container):
+        try:
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json"
+            }
+
+            data = {
+                "model": MODEL,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": content}
+                ],
+                "temperature": TEMPERATURE
+            }
+
+            response = requests.post(
+                f"{PROVIDER}/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=TIMEOUT
+            )
+
+            response.raise_for_status()
+
+            if signal_received:
+                result_container["result"] = (None, "Request interrupted after response, during processing")
+                return
+
+            print(f"Status code: {response.status_code}")
+            print(f"Raw response: {response.text.strip()[:DEBUG_SAMPLE_LENGTH]}")
+
+            if not response.text.strip():
+                print("Empty response received from API")
+                result_container["result"] = (None, "")
+                return
+
+            response_data = response.json()
+
+            if 'choices' not in response_data or not response_data['choices']:
+                print("No choices in response")
+                result_container["result"] = (None, json.dumps(response_data))
+                return
+
+            choice = response_data['choices'][0]
+            if 'message' not in choice or 'content' not in choice['message']:
+                print("No message content in response")
+                result_container["result"] = (None, json.dumps(response_data))
+                return
+
+            result_container["result"] = (choice['message']['content'], json.dumps(response_data))
+
+        except requests.exceptions.RequestException as e:
+            result_container["result"] = (None, str(e))
+        except json.JSONDecodeError as e:
+            result_container["result"] = (None, f"JSON Decode Error: {str(e)}")
+        except KeyError as e:
+            result_container["result"] = (None, f"KeyError: {str(e)}")
+        except Exception as e:
+            result_container["result"] = (None, str(e))
+
+
+    result_container = {}  # Dictionary to store the result
+    thread = threading.Thread(target=api_call_thread, args=(content, prompt, result_container))
+    thread.start()
+
     try:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "model": MODEL,
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": content}
-            ],
-            "temperature": TEMPERATURE
-        }
-        
-        response = requests.post(
-            f"{PROVIDER}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=TIMEOUT
-        )
-        
-        print(f"Status code: {response.status_code}")
-        print(f"Raw response: {response.text.strip()[:DEBUG_SAMPLE_LENGTH]}")
-        
-        response.raise_for_status()
-        
-        if not response.text.strip():
-            print("Empty response received from API")
-            return None, ""
-            
-        response_data = response.json()
-        
-        if 'choices' not in response_data or not response_data['choices']:
-            print("No choices in response")
-            return None, json.dumps(response_data)
-            
-        choice = response_data['choices'][0]
-        if 'message' not in choice or 'content' not in choice['message']:
-            print("No message content in response")
-            return None, json.dumps(response_data)
-            
-        return choice['message']['content'], json.dumps(response_data)
-        
-    except Exception as e:
-        print(f"API request failed: {str(e)}")
-        return None, str(e)
+        thread.join(timeout=TIMEOUT + 1)  # Allow a small buffer for timeout
+    except KeyboardInterrupt:
+        signal_received = True  # Set the flag
+        print("API call interrupted by user.")
+        return None, "API call interrupted by user."
+    
+    if thread.is_alive():
+        # Thread timed out or was interrupted
+        return None, "API call timed out or interrupted."
+
+    return result_container.get("result", (None, "Thread did not return a result"))
 
 def clean_json_response(response: str) -> str:
     if not response:
@@ -451,15 +496,15 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
     chunk_bounds = db.get_chunk_bounds(filename, chunk_number)
     if not chunk_bounds:
         return False
-    
+
     content = get_chunk_content(filename, chunk_bounds)
-    
+
     try:
         response, full_response = get_llm_response(
-            content, 
+            content,
             db.analyzer.query_config.prompt
         )
-        
+
         if response is None:
             result = ProcessingResult(
                 success=False,
@@ -469,12 +514,12 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
         else:
             cleaned_response = clean_json_response(response)
             json_response = json.loads(cleaned_response)
-            
+
             missing_nodes = [
-                node for node in db.analyzer.query_config.expected_json_nodes 
+                node for node in db.analyzer.query_config.expected_json_nodes
                 if node not in json_response
             ]
-            
+
             if missing_nodes:
                 result = ProcessingResult(
                     success=False,
@@ -487,16 +532,21 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
                     raw_response=full_response,
                     extracted_data=json_response
                 )
-        
+
         request_id = db.log_request(filename, chunk_number, MODEL, result)
-        
+
         if result.success and result.extracted_data:
-            db.store_results(
-                request_id, filename, chunk_number, result.extracted_data
-            )
-        
+            try:
+                db.store_results(
+                    request_id, filename, chunk_number, result.extracted_data
+                )
+            except sqlite3.OperationalError as e:
+                print(f"Error storing results: {e}. Check the DATA table schema.")
+                print(f"File: {filename}, Chunk: {chunk_number}")
+                raise  # Or sys.exit(1) to terminate
+
         return result.success
-        
+
     except Exception as e:
         result = ProcessingResult(
             success=False,
@@ -505,16 +555,78 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
         )
         db.log_request(filename, chunk_number, MODEL, result)
         return False
-
+    
 def get_current_timestamp_iso():
     """Returns current UTC timestamp in ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
+signal_received = False  # Add this global flag to avoid failures message duplication on terminal kill
+
+def get_run_summary(db_instance, start_iso, end_iso, max_failures):
+    """Retrieves and formats the run summary details."""
+
+    all_skipped = db_instance.get_all_skipped_chunks_for_run(start_iso, end_iso, max_failures)
+    summary = ""
+    if all_skipped:
+        summary += "\nFinal summary of skipped chunks:\n"
+        for file, chunk, failures in all_skipped:
+            summary += f"- {file} chunk {chunk} ({failures} failures)\n" #corrected here
+
+    try:
+        if db_instance and db_instance.connection:
+            cursor = db_instance.connection.cursor()
+            cursor.execute("SELECT COUNT(*) FROM REQUEST_LOG WHERE timestamp >= ? AND timestamp <= ?", (start_iso, end_iso))
+            llm_calls = cursor.fetchone()[0]
+
+            cursor.execute(f"""SELECT COUNT(*) 
+                           FROM {db_instance.analyzer.query_config.results_table}
+                           WHERE request_id IN (SELECT id from REQUEST_LOG where timestamp >= ? AND timestamp <= ?)""",
+                           (start_iso, end_iso))
+            successes = cursor.fetchone()[0]
+
+            summary += f"\nLLM calls made: {llm_calls}\nSuccessful data extractions: {successes}"
+
+        else:
+            summary += "\nDatabase not initialized or connection closed."
+    except sqlite3.OperationalError as e:
+        summary += f"\nError retrieving stats from database: {e}"
+    except AttributeError as e:
+        summary += f"\nAttributeError: {e}. Possible db initialization issues."
+
+    start_datetime = datetime.fromisoformat(start_iso.replace('Z', '+00:00'))
+    end_datetime = datetime.fromisoformat(end_iso.replace('Z', '+00:00'))
+    duration = end_datetime - start_datetime
+    summary += f"\nRun duration: {duration}"
+
+    return summary
+
+def signal_handler(sig, frame, db_instance, start_iso):
+    print("Signal handler called!")  # Add this line
+    """Handles Ctrl+C interrupt and prints a graceful message with stats."""
+    global signal_received
+    signal_received = True
+    print('\nCtrl+C detected. Gracefully exiting...')
+    end_iso = get_current_timestamp_iso()
+
+    try:
+        if db_instance and db_instance.connection:
+            print(get_run_summary(db_instance, start_iso, end_iso, MAX_FAILURES))
+        else:
+            print("Database not initialized or connection closed.")
+    except Exception as e:
+        print(f"Error in signal handler: {e}")
+
+    if db_instance and db_instance.connection:
+        db_instance.close()
+
+    sys.exit(0)
+    
 def main():
+    
+    global signal_received
+    start_iso = get_current_timestamp_iso()
 
-    iso_timestamp = get_current_timestamp_iso()
-
-    print(f"Start run at UTC {iso_timestamp}")
+    print(f"Start run at UTC {start_iso}")
     print("Using configuration:")
     print(f"Database: {RESULTS_DB}")
     print(f"Context window: {CONTEXT_WINDOW}")
@@ -541,55 +653,51 @@ def main():
                                 results_table=config.results_table
                             ))
 
-    db = Database(analyzer, args.comment)
+    db = Database(analyzer, args.run_tag)
     db.connect()  # Make sure this is called
     db.init_tables()  # Make sure this is called to create all necessary tables
 
-
-    skipped_chunks = set()
+    signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
     
     try:
-            while True:
-                files = [f for f in os.listdir(DATA_FOLDER) 
-                        if os.path.isfile(os.path.join(DATA_FOLDER, f))]
-                
-                unprocessed = []
-                for file in files:
-                    full_path = os.path.join(DATA_FOLDER, file)
-                    
-                    if not db.chunk_exists(full_path):
-                        chunks = calculate_chunks(full_path)
-                        db.insert_chunks(full_path, chunks)
-                    
-                    chunks = db.get_unprocessed_chunks(full_path, analyzer.query_config.results_table, args.comment)
-                    for chunk in chunks:
-                        if not db.get_recent_failures(chunk[0], chunk[1], 
-                                                    iso_timestamp, MAX_FAILURES):
-                            unprocessed.append(chunk)
-                        else:
-                            skipped_chunks.add((chunk[0], chunk[1]))
-                
-                if not unprocessed:
-                    if skipped_chunks:
-                        print("\nSkipped chunks due to excessive failures:")
-                        for file, chunk in sorted(skipped_chunks):
-                            print(f"- {file} chunk {chunk}")
-                    print("\nAll chunks processed or skipped!")
-                    break
-                
-                file, chunk_number = random.choice(unprocessed)
-                print(f"Processing {file} chunk {chunk_number}")
-                process_chunk(db, file, chunk_number)
-        
+        while True:
+            files = [f for f in os.listdir(DATA_FOLDER)
+                    if os.path.isfile(os.path.join(DATA_FOLDER, f))]
+
+            unprocessed = []
+            for file in files:
+                full_path = os.path.join(DATA_FOLDER, file)
+
+                if not db.chunk_exists(full_path):
+                    chunks = calculate_chunks(full_path)
+                    db.insert_chunks(full_path, chunks)
+
+                chunks = db.get_unprocessed_chunks(full_path, analyzer.query_config.results_table, start_iso, MAX_FAILURES, args.run_tag)
+                for chunk in chunks:
+                    unprocessed.append(chunk)
+
+            if not unprocessed:
+                print("\nAll chunks processed or skipped!")
+                break
+
+            file, chunk_number = random.choice(unprocessed)
+            print(f"Processing {file} chunk {chunk_number}")
+
+            process_chunk(db, file, chunk_number)
+
+            if signal_received:
+                print("Loop interrupted by user.")
+                break
+
     finally:
-        # Print final summary
-        all_skipped = db.get_all_skipped_chunks(iso_timestamp, MAX_FAILURES)
-        if all_skipped:
-            print("\nFinal summary of skipped chunks:")
-            for file, chunk, failures in all_skipped:
-                print(f"- {file} chunk {chunk} ({failures} failures)")
-            
+        end_iso = get_current_timestamp_iso()
+        if not signal_received:
+            print(get_run_summary(db, start_iso, end_iso, MAX_FAILURES))
         db.close()
+
+
+    
+
 
 
 if __name__ == "__main__":

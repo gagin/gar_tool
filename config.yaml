@@ -1,5 +1,5 @@
 # Extraction configuration
-name: public_art_vancouver # Used as a base name for SQLite file
+name: default # Used as a base name for SQLite file
 
 # LLM configuration defaults, can be overridden by command line parameters
 defaults:
@@ -7,8 +7,8 @@ defaults:
   temperature: 0
   debug_sample_length: 1500
   timeout: 30
-  data_folder: ./art-G
-  max_failures: 1  # Maximum number of failures per chunk
+  data_folder: ./singlesrc
+  max_failures: 2  # Maximum number of failures per chunk
   model: google/gemini-2.0-flash-001:floor
   provider: https://openrouter.ai/api/v1
 
@@ -24,36 +24,47 @@ nodes:
     format: text
     db_column: name
 
+  is_first_nations_quote:
+    description: >
+      If this art is related to First Nations, please provide a quote (one sentence length)
+      that supports this. If it's not related, keep it empty.
+    format: text
+    db_column: first_nations_quote
+    
   is_first_nations:
     description: Is it a first nations art
     format: boolean
-    db_column: first_nations   
-
-  is_first_nations_quote:
-    description: >
-      Provide a full sentence from the document that was base for determination whether
-      it's first nations
-    format: text
-    db_column: first_nations_quote
-  
-  is_relevant:
-    description: >
-      Can this be considered specific to Vancouver, or could be in some other city with
-      the same result?
-    format: boolean
-    db_column: relevant
+    db_column: first_nations 
 
   is_relevant_quote:
     description: >
-     Provide a full sentence from the document that was base for determination whether
-     it's Vancouver-specific
+     Is this art Vancouver-specific? Would anything be different if it was somewhere else?
+     It does not matter if it's a local artist and it is installed locally.
+     Consider only whether it integrates with local context somehow.
+     If it does, please provide a quote (one sentence length) supporting this.
+     Otherwise, keep it empty.
     format: text
     db_column: relevant_quote
+      
+  is_relevant:
+    description: >
+      Did you find it Vancouver-specific?
+    format: boolean
+    db_column: relevant
+
+  relevance_category:
+    description: >
+      If it is, how would you descibe in one word the reason why it is specific?
+      Capitalize the word, use noun, singular.
+    format: boolean
+    db_column: relevant_category
 
   visually_interesting:
-    description: How interesting it looks on scale of 0 to 10, as in being instagrammable
+    description: >
+      How interesting it looks on scale of 1 to 10, as in being instagrammable.
+      Use full range of possible values, from "a wall" to "fireworks made of flowers".
     format: number
-    db_column: instagramability
+    db_column: instagrammability
 
 # Prompt template
 prompt_template: |
@@ -63,4 +74,4 @@ prompt_template: |
   Response must be strictly JSON with these exact node names.
   Any reasoning, explanations, notes, comments should be limited to 50 words and go to notes node.
   Do your best to make subjective choices.
-  Treat it as a regular resident of the city.
+  Treat it as a regular resident of the city with a good visual taste, but no interest in art history.

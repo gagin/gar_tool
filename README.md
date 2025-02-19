@@ -18,12 +18,12 @@ This tool helps you extract specific information from large collections of text 
 
 ## <a id="key-features"></a>Key Features
 
-* **Extract Both Explicit and Implicit Data**: Retrieve both clearly defined data (e.g., addresses) and subtle, subjective details inferred from text (e.g., visual appeal ratings).
+* **Explicit and Implicit Data Extraction**: Retrieve both clearly defined data (e.g., addresses) and subtle, subjective details inferred from text (e.g., visual appeal ratings).
 * **Single-point Configuration**: Define what to extract and how to store it using a single record in config.yaml. This dual-purpose configuration instructs the LLM and structures the database storage, eliminating the need for separate definitions.
-* **Support for Multiple Models and Providers**: Compatible with various language models and providers, including options for local deployment to suit different needs.
+* **Multiple Models and Providers Support**: Compatible with various language models and providers, including options for local deployment to suit different needs.
 * **Parallel Processing with Checkpointing**: Process text files in parallel with automatic checkpointing, allowing for interruption and resumption.
 * **SQLite Database Storage**: Store results in an SQLite database for easy analysis and export.
-* **Test Run Tagging for Comparison**: Add comments via command-line parameter to database entries during testing, allowing for comparison of different configurations and detailed analysis.
+* **Test Labelling Capabilities**: Add run tags via command-line parameter to database entries during testing, allowing for comparison of different configurations and detailed analysis.
 
 ## <a id="conceptual-overview"></a>**Conceptual Overview: Generation Augmented Retrieval (GAR)**
 
@@ -173,9 +173,19 @@ The data is stored in a SQLite database (`public_art_vancouver.db`):
 > However, with sufficiently large context windows of modern models, the entire file often fits within a single chunk (`chunk=0`).
 
 
-1. Use [DB Browser for SQLite](https://sqlitebrowser.org/) to view and export data as CSV and process in Excel and Google Sheets.
-2. You can edit the `comment` field in DB Browser (don't forget to click **Write Changes!**).
-    * This allows you to add or modify comments after the initial processing.
+### Managing Data
+
+1. View and Export Data
+   * Use [DB Browser for SQLite](https://sqlitebrowser.org/) to examine your data
+   * Export results as CSV for analysis in Excel or Google Sheets
+
+2. Modifying Run Tags
+   * Edit the `run_tag` field directly in DB Browser 
+   * Remember to click "Write Changes" to save your modifications
+   * Use tags for:
+     * Adding post-processing comments
+     * Organizing different test runs
+     * Grouping related entries
 
 
 You can query the database to find interesting artworks:
@@ -215,21 +225,21 @@ LLMs process information sequentially, and their performance can vary significan
 Your optimal sequence may depend on your specific use case, document structure, and model capabilities. Measure accuracy with different orderings on a sample of your data.
 In my initial tests, the Quote -> Boolean -> Label (QBL) order seemed to work best, and that makes logical sense.
 
-##### Using `--comment` for Comparison Tests
+##### Using `--run_tag` for Comparison Tests
 
-The `--comment` argument allows you to add a comment to each record in the results database. This is particularly useful for comparing the effects of different field orders, models, or prompt variations.
+The `--run_tag` argument allows you to add a run_tag to each record in the results database. This is particularly useful for comparing the effects of different field orders, models, or prompt variations.
 
-For example, you could run the script multiple times with different configurations, using a unique comment for each run:
+For example, you could run the script multiple times with different configurations, using a unique tag for each run:
 
 ```bash
-python batch_doc_analyzer.py --config qbl.yaml --comment "QBL Order" --results_db comparison.db
-python batch_doc_analyzer.py --config blq.yaml --comment "BLQ Order" --results_db comparison.db
-python batch_doc_analyzer.py --config lqb.yaml --comment "LQB Order" --results_db comparison.db
-python batch_doc_analyzer.py --config qbl.yaml --temperature 1 --comment "QBL Temp1" --results_db comparison.db
+python batch_doc_analyzer.py --config qbl.yaml --run_tag "QBL Order" --results_db comparison.db
+python batch_doc_analyzer.py --config blq.yaml --run_tag "BLQ Order" --results_db comparison.db
+python batch_doc_analyzer.py --config lqb.yaml --run_tag "LQB Order" --results_db comparison.db
+python batch_doc_analyzer.py --config qbl.yaml --temperature 1 --run_tag "QBL Temp1" --results_db comparison.db
 ```
 **Note:** Ensure that the configuration files (`qbl.yaml`, `blq.yaml`, `lqb.yaml`) have the exact same columns configured. If the columns do not match, the script will fail because the database schema will not be compatible. The `--results_db` argument is used to specify the output database. It is used here to show that the database name can be changed, and that comparison results can be put in a dedicated file. If all the configs have the same project name, this argument is not needed, and the results will be put in a database named after the project.
 
-The script can only create duplicates of the same file and chunk if they have different comments. This allows you to easily compare the results of each run by querying the database using the comment as a filter.
+The script can only create duplicates of the same file and chunk if they have different run_tags. This allows you to easily compare the results of each run by querying the database using the run_tag as a filter.
 
 **Important**: If you intend to run configurations with different sets of columns (i.e., different schema), please refer to the <a href="#parallel-execution">Parallel Execution section</a> regarding the use of separate database files to avoid conflicts and data corruption.
 
@@ -299,7 +309,7 @@ Adjust the model and timeout as needed to ensure it correctly populates the `DAT
 
 ## <a id="parallel-execution"></a>Parallel Execution
 
-Parallel execution is an important consideration, especially when working with large file sets. The tool picks files in no particular order from the source directory until all are completed (i.e., `DATA` table contains records for all file-chunk pairs with the current `--comment` label). You can interrupt it with `Ctrl-C` and resume later. Note: When using `Ctrl-C`, Python will display an error message. This is normal and does not indicate data corruption. A future update will address this behavior.
+Parallel execution is an important consideration, especially when working with large file sets. The tool picks files in no particular order from the source directory until all are completed (i.e., `DATA` table contains records for all file-chunk pairs with the current `--run_tag` label). You can interrupt it with `Ctrl-C` and resume later.
 
 It appears to run fine with two parallel instances and even while inspecting the database with DB Browser. Editing and saving changes in DB Browser does not interfere with execution.
 
@@ -318,7 +328,7 @@ Here are the available command-line options:
 ```bash
 python batch_doc_analyzer.py --help
 usage: batch_doc_analyzer.py [-h] [--context_window CONTEXT_WINDOW] [--temperature TEMPERATURE] [--debug_sample_length DEBUG_SAMPLE_LENGTH] [--timeout TIMEOUT] [--data_folder DATA_FOLDER] [--results_db RESULTS_DB]
-                             [--config CONFIG] [--max_failures MAX_FAILURES] [--model MODEL] [--provider PROVIDER] [--comment COMMENT]
+                             [--config CONFIG] [--max_failures MAX_FAILURES] [--model MODEL] [--provider PROVIDER] [--run_tag LABEL]
 
 Process data with configurable constants.
 
@@ -340,7 +350,7 @@ options:
                         Maximum number of failures allowed for a chunk before it is skipped.
   --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
   --provider PROVIDER   Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.
-  --comment COMMENT     Tags records in the DATA table's 'comment' column with a run label for comparison testing (allows duplication of file+chunk).
+  --run_tag RUN_TAG     Tags records in the DATA table's 'run_tag' column with a run label for comparison testing (allows duplication of file+chunk).
 ```
 
 ## <a id="trouble"></a>Troubleshooting
@@ -364,10 +374,11 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - **YAML vs. JSON for config:** YAML indentation is annoying and leads to unexpected behavior (see Troubleshooting). Should we switch to JSON for the config file?
 - **Default db_column to Node Name:** Make clear that if `db_column` node isn't present, it will not be recorded to `DATA`. But to avoid repeated typing, allow it to be left empty, and then the node name should be used.
 
+### Unstructured and not thought through notes and ideas on further improvements
 - reordering test - make sure they don't refer to previous ones, e.g.
 - if there are formatting rules for several fields, you can put them to the overall prompt with persona info
 - is required:false used, does it even make sense?
-- should comment default to config file name? - yes, and rename to run_tag, and mention in document, that it can also be used, for example, for model names, if these are compared
+- should run_tag default to config file name? - yes, and mention in document, that it can also be used, for example, for model names, if these are compared
 - universal value for not found
 - order is important mostly for deduced fields
 - do i want to keep folder name? additional field without folder name?
@@ -383,4 +394,5 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - --version support
 - --structured_output=true/false/test with test is default
 - Ask to do things rather than avoid things
+- advisable to have single-doc directory in default config.yaml, and provide full directory via --data_folder to avoid costs on mistakenly triggered runs
 
