@@ -3,7 +3,7 @@ name: public_art_vancouver_g # Used as a base name for SQLite file
 
 # LLM configuration defaults, can be overridden by command line parameters
 defaults:
-  context_window: 50000
+  chunk_size: 50000
   temperature: 0
   timeout: 30
   data_folder: ./art-G

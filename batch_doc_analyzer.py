@@ -2,14 +2,17 @@ import sqlite3
 import os
 import signal
 import sys
+import stat
 import yaml
+import textwrap
 import argparse
+from argparse import Namespace
 import json
 import random
 import re
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, SupportsFloat
 from dotenv import load_dotenv
 import requests
 import requests.exceptions
@@ -17,11 +20,11 @@ import threading
 import time
 import logging
 
-VERSION = '0.1.10' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.11' # requires major.minor.patch notation for auto-increment on commits via make command
 
 @dataclass
 class ExtractorDefaults:
-    context_window: int
+    chunk_size: int
     temperature: float
     timeout: int
     data_folder: str
@@ -56,17 +59,7 @@ class ConfigLoader:
         if not isinstance(defaults, dict):
             raise ValueError("'defaults' must be a dictionary")
             
-        # Validate specific default values
-        if not (0 <= defaults.get('temperature', 0) <= 1):
-            raise ValueError("Temperature must be between 0 and 1")
-        if defaults.get('context_window', 0) <= 0:
-            raise ValueError("Context window must be positive")
-        if defaults.get('timeout', 0) <= 0:
-            raise ValueError("Timeout must be positive")
-        if not defaults.get('data_folder'):
-            raise ValueError("Data folder must be specified")
-        if defaults.get('max_failures', 0) < 0:
-            raise ValueError("Max failures must be non-negative")
+        # Values check is done after CLI overrides
             
         # Validate nodes
         nodes = config_data['nodes']
@@ -90,7 +83,7 @@ class ConfigLoader:
             
             # Load defaults
             defaults = ExtractorDefaults(
-                context_window=config_data['defaults']['context_window'],
+                chunk_size=config_data['defaults']['chunk_size'],
                 temperature=config_data['defaults']['temperature'],
                 timeout=config_data['defaults']['timeout'],
                 data_folder=config_data['defaults']['data_folder'],
@@ -139,91 +132,185 @@ def check_duplicate_args(argv): # Checks for duplicate named arguments and exits
                 sys.exit(1)
                 seen_args.add(arg)
 
-check_duplicate_args(sys.argv)
-parser = argparse.ArgumentParser(description="Process data with configurable constants.")
+def parse_arguments() -> Namespace:
+    parser = argparse.ArgumentParser(description="Process data with configurable constants.")
 
-parser.add_argument('--context_window', type=int, help="Context window size (in tokens). Files exceeding this size will be split into chunks.")
-parser.add_argument('--temperature', type=float, help="Temperature for model generation (0.0 to 1.0). Higher values increase creativity. Defaults to 0 for predictable categorization. DeepSeek recommends 0.6 for more creative tasks.")
-parser.add_argument('--llm_debug_excerpt_length', type=int, default=200, help="Maximum length (characters) of LLM response excerpt displayed in debug logs (default: %(default)s).")
-parser.add_argument('--timeout', type=int, help="Timeout (in seconds) for requests to the LLM API.")
-parser.add_argument('--data_folder', type=str, help="Path to the directory containing the text files to process.")
-parser.add_argument('--results_db', type=str, help="Name of the SQLite database file to store results. If not specified, the project name from config.yaml is used.")
-parser.add_argument('--config', type=str, default='config.yaml', help="Path to the YAML configuration file containing extraction parameters (default: %(default)s).")
-parser.add_argument('--max_failures', type=int, help="Maximum number of failures allowed for a chunk before it is skipped.")
-parser.add_argument('--model', type=str, help="Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').")
-parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
-parser.add_argument('--run_tag', type=str, help="Tags records in the DATA table's 'run_tag' column with a run label for comparison testing (allows duplication of file+chunk).")
-parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
-parser.add_argument(
-    '--log_level',
-    type=str,
-    default='INFO',  # Default is INFO
-    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],  # Valid choices
-    help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) (default: %(default)s)."
-)
-parser.add_argument(
-    '--skip_key_check',
-    action='store_true',
-    help="Skip API key check (use for models that don't require keys, alternatively you can set OPENROUTER_API_KEY in .env to any non-empty value)."
-)
+    # Configuration file
+    parser.add_argument('--config', type=str, default='config.yaml', help=textwrap.dedent("""
+        Path to the YAML configuration file containing extraction
+        parameters (default: %(default)s).
+    """))
 
-args = parser.parse_args()
+    # Configuration from YAML file
+    config_group = parser.add_argument_group("Input and output (command line overwrites values from configuration YAML file)")
 
-# Configure logging based on the command-line argument
-log_level = getattr(logging, args.log_level.upper())
+    config_group.add_argument('--data_folder', type=str, help=textwrap.dedent("""
+        Path to the directory containing the text files to process.
+    """))
 
-root_logger = logging.getLogger()
-root_logger.setLevel(log_level) 
+    config_group.add_argument('--chunk_size', type=int, help=textwrap.dedent("""
+        Chunk size (in characters). Files exceeding this size will be
+        split into chunks. The combined chunk and prompt must fit within
+        the model's context window (measured in tokens, not characters).
+        Token length varies by language. See the README for details.
+    """))
 
-class InfoFormatter(logging.Formatter):
-    def format(self, record):
-        if record.levelname == 'INFO':
-            return record.getMessage()
-        return super().format(record)
+    parser.add_argument('--results_db', type=str, help=textwrap.dedent("""
+        Name of the SQLite database file to store results. If not
+        specified, the project name from the YAML configuration file
+        is used.
+    """))
 
-handler = logging.StreamHandler()
-handler.setFormatter(InfoFormatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
-root_logger.addHandler(handler)
+    config_group = parser.add_argument_group("AI parameters (command line overwrites values from configuration YAML file)")
 
+    config_group.add_argument('--model', type=str, help=textwrap.dedent("""
+        Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
+    """))
 
-config = ConfigLoader.load_config(args.config)
+    config_group.add_argument('--provider', type=str, help=textwrap.dedent("""
+        Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1').
+        Default: OpenRouter.
+    """))
 
-# Override defaults with command line arguments if provided
-CONTEXT_WINDOW = args.context_window or config.defaults.context_window
-TEMPERATURE = args.temperature or config.defaults.temperature
-LLM_DEBUG_EXCERPT_LENGTH = args.llm_debug_excerpt_length
-TIMEOUT = args.timeout or config.defaults.timeout
-DATA_FOLDER = args.data_folder or config.defaults.data_folder
-RESULTS_DB = args.results_db or f"{config.name}.db"
-MAX_FAILURES = args.max_failures or config.defaults.max_failures
-MODEL = args.model or config.defaults.model
-PROVIDER = args.provider or config.defaults.provider
+    parser.add_argument('--skip_key_check', action='store_true', help=textwrap.dedent("""
+        Skip API key check (use for models that don't require keys, or
+        set OPENROUTER_API_KEY in .env to any non-empty value).
+    """))
 
-def validate_config():
-    if TEMPERATURE < 0 or TEMPERATURE > 1:
-        raise ValueError(f"Temperature must be between 0 and 1, got {TEMPERATURE}")
-    if CONTEXT_WINDOW <= 0:
-        raise ValueError(f"Context window must be positive, got {CONTEXT_WINDOW}")
-    if TIMEOUT <= 0:
-        raise ValueError(f"Timeout must be positive, got {TIMEOUT}")
-    if MAX_FAILURES < 1:
-        raise ValueError("Max failures must be positive number")
-    if MAX_FAILURES > 10:
-        raise ValueError("Doesn't make sense to allow more than 10 failures, edit script if you are certain")
+    config_group.add_argument('--temperature', type=float, help=textwrap.dedent("""
+        Temperature for model generation (0.0 to 1.0). Higher values
+        increase creativity.  A value of 0 is recommended for predictable document processing.
+    """))
+
+    config_group = parser.add_argument_group("Run parameters (command line overwrites values from configuration YAML file)")
+  
+    parser.add_argument('--run_tag', type=str, help=textwrap.dedent("""
+        Tags records in the DATA table's 'run_tag' column with a run
+        label for comparison testing (allowing duplication of
+        file and chunk combinations).  Use this to differentiate
+        runs based on model name, field order, temperature, or other variations.
+    """))
     
-# Load environment variables
-load_dotenv()
+    config_group.add_argument('--timeout', type=int, help=textwrap.dedent("""
+        Timeout (in seconds) for requests to the LLM API.
+    """))
 
-# Get environment variables
-OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+    config_group.add_argument('--max_failures', type=int, help=textwrap.dedent("""
+        Maximum number of consecutive failures allowed for a chunk before it
+        is skipped.
+    """))
 
-if not OPENROUTER_API_KEY and not args.skip_key_check:
-    error_message = (
-        "API key is missing. Either set the OPENROUTER_API_KEY environment variable, "
-        "or use --skip_key_check if the model does not require an API key."
-    )
-    logging.error(error_message)
-    sys.exit(1)
+    config_group = parser.add_argument_group("Script control")
+
+    parser.add_argument('--llm_debug_excerpt_length', type=int, default=200, help=textwrap.dedent("""
+        Maximum length (in characters) of LLM response excerpts displayed
+        in debug logs (default: %(default)s).
+    """))
+
+    parser.add_argument('--log_level', type=str, default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help=textwrap.dedent("""
+        Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        (default: %(default)s).
+    """))
+
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}", help=textwrap.dedent("""
+        Show program's version number and exit.
+    """))
+
+    return parser.parse_args()
+
+def setup_logger(log_level: str):  # Takes log level as string
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level) 
+
+    class InfoFormatter(logging.Formatter):
+        def format(self, record):
+            if record.levelname == 'INFO':
+                return record.getMessage()
+            return super().format(record)
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(InfoFormatter('%(asctime)s - %(levelname)s - %(message)s')) # removed name, there's only root here
+    root_logger.addHandler(handler)
+
+def validate_params(
+    temperature: SupportsFloat,
+    chunk_size: int,
+    timeout: int,
+    max_failures: int,
+    llm_debug_excerpt_length: int,
+    data_folder: str,
+    model: str,
+    provider: str,
+    openrouter_api_key: Optional[str] = None,
+    skip_key_check: bool = False,
+    max_failures_limit: int = 5 # Default limit
+):
+    """Validates input parameters, raising an exception on the first error.
+       Includes superficial API key validation.
+    Raises:
+        TypeError: If a parameter is of the wrong type.
+        ValueError: If a parameter's value is invalid.
+        FileNotFoundError: If the data folder does not exist.
+        NotADirectoryError: If the provided path is not a directory.
+        PermissionError: If the data folder is not readable.
+        ValueError: If API key is missing and not skipped.
+    """
+
+    if not isinstance(temperature, (int, float)):
+        raise TypeError(f"Temperature must be a number, got {type(temperature)}")
+    if not (0 <= temperature <= 1):
+        raise ValueError(f"Temperature must be between 0 and 1, got {temperature}")
+
+    if not isinstance(chunk_size, int):
+        raise TypeError(f"Context window must be an integer, got {type(chunk_size)}")
+    if chunk_size <= 0:
+        raise ValueError(f"Context window must be positive, got {chunk_size}")
+
+    if not isinstance(timeout, int):
+        raise TypeError(f"Timeout must be an integer, got {type(timeout)}")
+    if timeout <= 0:
+        raise ValueError(f"Timeout must be positive, got {timeout}")
+
+    if not isinstance(max_failures, int):
+        raise TypeError(f"Max failures must be an integer, got {type(max_failures)}")
+    if max_failures < 1:
+        raise ValueError(f"Max failures must be at least 1, got {max_failures}")
+    if max_failures > max_failures_limit:  # Use the parameter here
+        raise ValueError(f"Max failures cannot exceed {max_failures_limit}, got {max_failures}")
+
+    if not isinstance(llm_debug_excerpt_length, int):
+        raise TypeError(f"LLM debug excerpt length must be an integer, got {type(llm_debug_excerpt_length)}")
+    if llm_debug_excerpt_length <= 0:
+        raise ValueError(f"LLM debug excerpt length must be positive, got {llm_debug_excerpt_length}")
+
+    if not isinstance(data_folder, str):
+        raise TypeError(f"Data folder must be a string, got {type(data_folder)}")
+    if not data_folder:  # Check for empty string
+        raise ValueError("Data folder must be specified")
+    if not os.path.exists(data_folder):
+        raise FileNotFoundError(f"Data folder '{data_folder}' does not exist")
+    if not os.path.isdir(data_folder):
+        raise NotADirectoryError(f"'{data_folder}' is not a directory")
+    if not os.access(data_folder, os.R_OK):
+        raise PermissionError(f"Data folder '{data_folder}' is not readable")
+    
+    if not isinstance(model, str):
+        raise TypeError(f"Model must be a string, got {type(model)}")
+    if not model:  # Check for empty string
+        raise ValueError("Model cannot be empty")
+
+    if not isinstance(provider, str):
+        raise TypeError(f"Provider must be a string, got {type(provider)}")
+    if not provider:  # Check for empty string
+        raise ValueError("Provider cannot be empty")
+
+    if not openrouter_api_key and not skip_key_check:
+        error_message = textwrap.dedent("""
+            API key is missing. Either set the OPENROUTER_API_KEY environment variable,
+            or use --skip_key_check if the model does not require an API key.
+            """)
+        logging.error(error_message)  # Log the error
+        raise ValueError(error_message) # Raise an exception to stop execution
 
 @dataclass
 class Column:
@@ -280,10 +367,11 @@ class Database:
         self.analyzer = analyzer
         self.run_tag = run_tag
         self.connection = None
-        self.schema = self._create_schema()
+
 
     def __enter__(self):
         self.connect()
+        self.schema = self._create_schema()
         self.init_tables()
         return self
         
@@ -293,8 +381,66 @@ class Database:
             self.connection = None
             
     def connect(self):
-        self.connection = sqlite3.connect(self.analyzer.db_path)
-        return self.connection
+        db_path = self.analyzer.db_path
+
+        try:
+            self.connection = sqlite3.connect(db_path)
+            return self.connection
+
+        except sqlite3.OperationalError as e:
+            if hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_LOCKED:
+                msg = f"The database file '{db_path}' is locked. Underlying error: {e}"
+                logging.error(msg)
+                raise sqlite3.OperationalError(msg)
+
+            elif hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_CORRUPT:
+                msg = f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}"
+                logging.error(msg)
+                raise sqlite3.DatabaseError(msg)
+
+            if os.path.isdir(db_path):
+                msg = f"The path '{db_path}' is a directory, not a file."
+                logging.error(msg)
+                raise IsADirectoryError(msg)
+
+            try:  # Check permissions on the file using os.stat
+                mode = os.stat(db_path).st_mode
+                if not (stat.S_IREAD & mode and stat.S_IWRITE & mode):
+                    msg = f"The file '{db_path}' does not have read and write permissions."
+                    logging.error(msg)
+                    raise PermissionError(msg)
+            except Exception as perm_e:  # Catch any exception during permission check
+                msg = f"An unexpected error occurred when checking file permissions: {perm_e}"
+                logging.error(msg)
+                raise perm_e
+
+
+            try:  # Check permissions on the *parent* directory (using os.access)
+                parent_dir = os.path.dirname(db_path)
+                if not os.access(parent_dir, os.W_OK):  # Check write access to parent
+                    msg = f"The directory '{parent_dir}' does not have write permissions."
+                    logging.error(msg)
+                    raise PermissionError(msg)
+            except Exception as dir_perm_e:
+                msg = f"An unexpected error occurred when checking directory permissions: {dir_perm_e}"
+                logging.error(msg)
+                raise dir_perm_e
+
+
+            # If none of the above, re-raise the original OperationalError
+            msg = f"An OperationalError occurred: {e}"
+            logging.error(msg)
+            raise
+
+        except sqlite3.DatabaseError as e:
+            msg = f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}"
+            logging.error(msg)
+            raise sqlite3.DatabaseError(msg)
+
+        except Exception as e:
+            msg = f"An unexpected error occurred: {e}"
+            logging.exception(msg)  # Log traceback
+            raise
         
     def init_tables(self):
         cursor = self.connection.cursor()
@@ -484,31 +630,31 @@ class Database:
 
         return cursor.fetchall()
 
-def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
+def get_llm_response(content: str, prompt: str, key: str, model: str, provider: str, temp: str, timeout: str, excerpt: int) -> Tuple[Optional[str], str]:
     global signal_received
     if signal_received:
         return None, "Request skipped due to interrupt."
     
     try:
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {key}",
             "Content-Type": "application/json"
         }
 
         data = {
-            "model": MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": content}
             ],
-            "temperature": TEMPERATURE
+            "temperature": temp
         }
 
         response = requests.post(
-            f"{PROVIDER}/chat/completions",
+            f"{provider}/chat/completions",
             headers=headers,
             json=data,
-            timeout=TIMEOUT
+            timeout=timeout
         )
 
         response.raise_for_status()
@@ -517,7 +663,7 @@ def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
             return None, "Request interrupted after response, during processing"
 
         logging.debug(f"Status code: {response.status_code}")
-        logging.debug(f"Raw response: {response.text.strip()[:LLM_DEBUG_EXCERPT_LENGTH]}")
+        logging.debug(f"Raw response: {response.text.strip()[:excerpt]}")
 
         if not response.text.strip():
             return None, ""
@@ -534,7 +680,7 @@ def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
         return choice['message']['content'], json.dumps(response_data)
 
     except requests.exceptions.RequestException as e:
-        logging.exception(f"Error making request to {PROVIDER}: {e}")
+        logging.exception(f"Error making request to {provider}: {e}")
         return None, f"Request error: {e}"
     except json.JSONDecodeError as e:
         logging.exception(f"Error decoding JSON response: {e}")
@@ -550,7 +696,7 @@ def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
         return None, f"Unexpected error: {e}"
     
 
-def _aggressive_json_cleaning(response: str) -> str:
+def _aggressive_json_cleaning(response: str, excerpt: int) -> str:
     """Attempts aggressive ```json extraction, falling back to super-aggressive cleaning."""
     match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
     if match:
@@ -560,15 +706,15 @@ def _aggressive_json_cleaning(response: str) -> str:
             logging.debug("Aggressive JSON extraction from ```json block successful.")
             return json_string
         except json.JSONDecodeError as e:
-            logging.debug(f"Aggressive JSON decode error: {e}. Falling back to super-aggressive cleaning. Raw response: {response[:LLM_DEBUG_EXCERPT_LENGTH]}")
-            return _super_aggressive_json_cleaning(response)  # Call super-aggressive
+            logging.debug(f"Aggressive JSON decode error: {e}. Falling back to super-aggressive cleaning. Raw response: {response[:excerpt]}")
+            return _super_aggressive_json_cleaning(response, excerpt)  # Call super-aggressive
         except Exception as e:
             logging.error(f"Unexpected error during aggressive ```json extraction: {e}")
             return response
     else: # If no match for ```json block
-        return _super_aggressive_json_cleaning(response)  # Call super-aggressive
+        return _super_aggressive_json_cleaning(response, excerpt)  # Call super-aggressive
 
-def _super_aggressive_json_cleaning(response: str) -> str:
+def _super_aggressive_json_cleaning(response: str, excerpt: int) -> str:
     """Attempts super-aggressive curly braces cleaning."""
     try:
         start = response.find('{')
@@ -578,10 +724,10 @@ def _super_aggressive_json_cleaning(response: str) -> str:
             try:
                 json.loads(super_aggressive_cleaned_response)
                 logging.debug("Super-aggressive JSON cleaning helped.")
-                logging.debug(f"Super-aggressively cleaned response: {super_aggressive_cleaned_response[:LLM_DEBUG_EXCERPT_LENGTH]}...")
+                logging.debug(f"Super-aggressively cleaned response: {super_aggressive_cleaned_response[:excerpt]}...")
                 return super_aggressive_cleaned_response
             except json.JSONDecodeError as e:
-                logging.error(f"Super-aggressive JSON cleaning failed: {e}. Raw response: {response[:LLM_DEBUG_EXCERPT_LENGTH]}")
+                logging.error(f"Super-aggressive JSON cleaning failed: {e}. Raw response: {response[:excerpt]}")
                 return response
         else:
             logging.error("Could not find JSON braces in the response.")
@@ -591,7 +737,7 @@ def _super_aggressive_json_cleaning(response: str) -> str:
         return response
 
 
-def clean_json_response(response: str) -> str:
+def clean_json_response(response: str, excerpt: int) -> str:
     """Cleans the LLM response to extract JSON, using aggressive and super-aggressive cleaning as fallbacks."""
 
     if not response:
@@ -607,15 +753,15 @@ def clean_json_response(response: str) -> str:
         json.loads(cleaned_response)
         return cleaned_response
     except json.JSONDecodeError as e:
-        logging.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. Raw response: {response[:LLM_DEBUG_EXCERPT_LENGTH]}")
-        return _aggressive_json_cleaning(response)  # Call aggressive cleaning
+        logging.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. Raw response: {response[:excerpt]}")
+        return _aggressive_json_cleaning(response, excerpt)  # Call aggressive cleaning
 
 
     except Exception as e:
         logging.error(f"Unexpected error during initial cleaning: {e}")
         return response
 
-def calculate_chunks(filename: str) -> List[Tuple[int, int]]:
+def calculate_chunks(filename: str, chunk_size: int) -> List[Tuple[int, int]]:
     try:
         with open(filename, 'r', encoding='utf-8') as file:
             content = file.read()
@@ -626,18 +772,18 @@ def calculate_chunks(filename: str) -> List[Tuple[int, int]]:
     if not content:
         return []
     
-    if len(content) <= CONTEXT_WINDOW:
+    if len(content) <= chunk_size:
         return [(0, len(content))]  # Single chunk if it fits
     
     chunks = []
     start = 0
     
     while start < len(content):
-        window = content[start:start + CONTEXT_WINDOW]
+        window = content[start:start + chunk_size]
         match = list(re.finditer(r'[\.\!\?]\s', window))
         
         if not match: 
-            end = min(start + CONTEXT_WINDOW, len(content))
+            end = min(start + chunk_size, len(content))
         else:
             end = start + match[-1].end()
         
@@ -651,7 +797,7 @@ def get_chunk_content(filename: str, chunk_bounds: Tuple[int, int]) -> str:
         content = file.read()
         return content[chunk_bounds[0]:chunk_bounds[1]]
 
-def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
+def process_chunk(db: Database, filename: str, chunk_number: int, key: str, model: str, provider: str, temp: str, timeout: str, excerpt: int) -> bool:
     """Invokes LLM call function and stores results"""
     chunk_bounds = db.get_chunk_bounds(filename, chunk_number)
     if not chunk_bounds:
@@ -662,7 +808,13 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
     try:
         response, full_response = get_llm_response(
             content,
-            db.analyzer.query_config.prompt
+            db.analyzer.query_config.prompt,
+            key=key,
+            model=model,
+            provider=provider,
+            temp=temp,
+            timeout=timeout,
+            excerpt=excerpt
         )
 
         if response is None:
@@ -672,7 +824,7 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
                 error_message="Empty response from model"
             )
         else:
-            cleaned_response = clean_json_response(response)
+            cleaned_response = clean_json_response(response, excerpt)
             json_response = json.loads(cleaned_response)
 
             missing_nodes = [
@@ -693,7 +845,7 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
                     extracted_data=json_response
                 )
 
-        request_id = db.log_request(filename, chunk_number, MODEL, result)
+        request_id = db.log_request(filename, chunk_number, model, result)
 
         if result.success and result.extracted_data:
             try:
@@ -712,7 +864,7 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
             raw_response=full_response,
             error_message=f"Error processing chunk: {str(e)}"
         )
-        db.log_request(filename, chunk_number, MODEL, result)
+        db.log_request(filename, chunk_number, model, result)
         return False
     
 def get_current_timestamp_iso():
@@ -759,7 +911,7 @@ def get_run_summary(db_instance, start_iso, end_iso, max_failures):
 
     return summary
 
-def signal_handler(sig, frame, db_instance, start_iso):
+def signal_handler(sig, frame, db_instance, start_iso, max_failures):
     """Handles Ctrl+C interrupt and prints a graceful message with stats."""
     global signal_received
     signal_received = True
@@ -768,7 +920,7 @@ def signal_handler(sig, frame, db_instance, start_iso):
 
     try:
         if db_instance and db_instance.connection:
-            logging.info(get_run_summary(db_instance, start_iso, end_iso, MAX_FAILURES))
+            logging.info(get_run_summary(db_instance, start_iso, end_iso, max_failures))
         else:
             logging.error("Database not initialized or connection closed.")
     except Exception as e:
@@ -783,23 +935,54 @@ def main():
     global signal_received
     start_iso = get_current_timestamp_iso()
 
+    check_duplicate_args(sys.argv)
+    args = parse_arguments()
+    
+    setup_logger(args.log_level)
+    
+    config = ConfigLoader.load_config(args.config)
+
+    # Override defaults with command line arguments if provided
+    CHUNK_SIZE = args.chunk_size or config.defaults.chunk_size
+    TEMPERATURE = args.temperature or config.defaults.temperature
+    LLM_DEBUG_EXCERPT_LENGTH = args.llm_debug_excerpt_length
+    TIMEOUT = args.timeout or config.defaults.timeout
+    DATA_FOLDER = args.data_folder or config.defaults.data_folder
+    RESULTS_DB = args.results_db or f"{config.name}.db"
+    MAX_FAILURES = args.max_failures or config.defaults.max_failures
+    MODEL = args.model or config.defaults.model
+    PROVIDER = args.provider or config.defaults.provider
+
+
     logging.info("Welcome! Check README at Github for useful prompt engineering tips")
     logging.info(f"Version {VERSION} started run at UTC {start_iso}")
     if args.run_tag:
         logging.info(f"Run Tag: {args.run_tag}")
     logging.info("\nUsing configuration:")
     logging.info(f"Database: {RESULTS_DB}")
-    logging.info(f"Context window: {CONTEXT_WINDOW}")
+    logging.info(f"Context window: {CHUNK_SIZE}")
     logging.info(f"Temperature: {TEMPERATURE}")
     logging.info(f"LLM Excerpt Length: {LLM_DEBUG_EXCERPT_LENGTH}")
     logging.info(f"Timeout: {TIMEOUT}")
     logging.info(f"Data folder: {DATA_FOLDER}")
     logging.info(f"Max failures: {MAX_FAILURES}")
-    logging.info(f"Model: {MODEL}\n\nPress Ctrl-C to stop the run (you can continue later)\n")
+    logging.info(f"Model: {MODEL}\n\nPress Ctrl-C to stop the run (you can continue later)\n")# Load environment variables
 
-    if not os.path.exists(DATA_FOLDER):
-        logging.error("Data folder does not exist")
-        return
+    load_dotenv()
+    OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+
+    validate_params(
+        temperature=TEMPERATURE,
+        chunk_size=CHUNK_SIZE,
+        timeout=TIMEOUT,
+        max_failures=MAX_FAILURES,
+        llm_debug_excerpt_length=LLM_DEBUG_EXCERPT_LENGTH,
+        data_folder=DATA_FOLDER,
+        model=MODEL,
+        provider=PROVIDER,
+        openrouter_api_key=OPENROUTER_API_KEY,
+        skip_key_check=args.skip_key_check
+    )         
 
     analyzer = DocumentAnalyzer(
         RESULTS_DB,
@@ -815,7 +998,7 @@ def main():
 
     with Database(analyzer, args.run_tag) as db:
         db.create_indexes() # Create indexes after connecting to the database.
-        signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
+        signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso, MAX_FAILURES))
         
         try:
             while True:
@@ -827,7 +1010,7 @@ def main():
                     full_path = os.path.join(DATA_FOLDER, file)
 
                     if not db.chunk_exists(full_path):
-                        chunks = calculate_chunks(full_path)
+                        chunks = calculate_chunks(full_path, CHUNK_SIZE)
                         db.insert_chunks(full_path, chunks)
 
                     chunks = db.get_unprocessed_chunks(
@@ -846,7 +1029,17 @@ def main():
                 file, chunk_number = random.choice(unprocessed)
                 logging.info(f"Processing {file} chunk {chunk_number}")
 
-                process_chunk(db, file, chunk_number)
+                process_chunk(
+                    db=db,
+                    filename=file,
+                    chunk_number=chunk_number,
+                    key=OPENROUTER_API_KEY,
+                    model=MODEL,
+                    provider=PROVIDER,
+                    temp=TEMPERATURE,
+                    timeout=TIMEOUT,
+                    excerpt=LLM_DEBUG_EXCERPT_LENGTH,
+                )
 
                 if signal_received:
                     logging.info("Loop interrupted by user.")

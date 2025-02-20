@@ -393,7 +393,7 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 
 ## <a id="to-do"></a>To-Do
 
-- **Handle varied model output:** Some models like LLama 70B Nemotron might add prefixes like "Here's the JSON:" to their responses, we could try to handle that. Ideally, we should also explore using [structured outputs](https://platform.openai.com/docs/guides/function-calling) for models that support them for better reliability and potentially fewer tokens / lower cost. Right now, our JSON prompting works and supports more models (including local ones). 
+- **Use structured model output where possible:** We should also explore using [structured outputs](https://platform.openai.com/docs/guides/function-calling) for models that support them for better reliability and potentially fewer tokens / lower cost. Right now, our JSON prompting works and supports more models (including local ones). 
 - **Show defaults in `--help`:** Make the `--help` output show default values for command-line options.
 - **Direct CSV input:** Let users input CSV files directly, without needing to convert them to text first.
 - **Database Schema Type Consistency:** Ensure that the database schema is created using the type declarations from the `config.yaml` file. Currently, all fields are stored as TEXT, even when `format` specifies other types (e.g., number, boolean). While SQLite's dynamic typing allows for some flexibility in queries, maintaining schema consistency will improve data integrity and clarity.
@@ -417,7 +417,7 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - Ask the model to do things rather than avoid things (instead of don't hallucinate, say ground answers in the document provided and ignore coincidences with real world)
 - advisable to have single-doc directory in default config.yaml, and provide full directory via --data_folder to avoid costs on mistakenly triggered runs
 - version_update, pre-commit and install_hooks - don't worry about it unless you change the script and want to have auto-increments to version
-- In our approach is document is fed to LLM independently, thus ignoring information that is in commonality between files. For a human eyes, extracting fields from several files will result in next ones being processed faster and with better quality. It unclear though how to technically achieve a similar effect with a model.
+- In our approach is document is fed to LLM independently, thus ignoring information that is in commonality between files. For a human eyes, extracting fields from several files will result in next ones being processed faster and with better quality. It unclear though how to technically achieve a similar effect with a model. Idea: after each call, do another call with full response csv (current run or length-limited total) and ask model either to normalise, or to provide a feedback on the last addition if needed - and if there is a feedback, rerun extraction model with this comment. Sounds as a fun agentic trick, worthy to implement just for kicks. Even though it doesn't fully solve the original problem. Another agentic trick - first feeds several documents at once to a strong model with our prompt and ask for prompt improvements based on similarity of these documents, and use the improved one.
 
 ### Technical
 - is required:false used, does it even make sense?
