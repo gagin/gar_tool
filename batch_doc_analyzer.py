@@ -17,7 +17,7 @@ import threading
 import time
 import logging
 
-VERSION = '0.1.7' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.8' # requires major.minor.patch notation for auto-increment on commits via make command
 
 @dataclass
 class ExtractorDefaults:
@@ -225,7 +225,7 @@ if not OPENROUTER_API_KEY and not args.skip_key_check:
         "or use --skip_key_check if the model does not require an API key."
     )
     logging.error(error_message)
-    sys.exit(1)  # Or handle differently
+    sys.exit(1)
 
 @dataclass
 class Column:
@@ -643,7 +643,7 @@ def process_chunk(db: Database, filename: str, chunk_number: int) -> bool:
                 )
             except sqlite3.OperationalError as e:
                 logging.error(f"Error storing results: {e}. Check the DATA table schema. File: {filename}, Chunk: {chunk_number}")
-                raise  # Or sys.exit(1) to terminate
+                sys.exit(1) # instead of raise, as it's a standalone script and nothing will process the escalated error
 
         return result.success
 
@@ -670,7 +670,7 @@ def get_run_summary(db_instance, start_iso, end_iso, max_failures):
     if all_skipped:
         summary += "\nFinal summary of skipped chunks:\n"
         for file, chunk, failures in all_skipped:
-            summary += f"- {file} chunk {chunk} ({failures} failures)\n" #corrected here
+            summary += f"- {file} chunk {chunk} ({failures} failures)\n"
 
     try:
         if db_instance and db_instance.connection:
