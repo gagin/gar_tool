@@ -17,12 +17,7 @@ import threading
 import time
 import logging
 
-logging.basicConfig(
-    level=logging.DEBUG,  # Or logging.DEBUG, logging.WARNING, etc.
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
-VERSION = '0.1.5' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.6' # requires major.minor.patch notation for auto-increment on commits via make command
 
 @dataclass
 class ExtractorDefaults:
@@ -160,7 +155,38 @@ parser.add_argument('--model', type=str, help="Name of the LLM to use for analys
 parser.add_argument('--provider', type=str, help="Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.")
 parser.add_argument('--run_tag', type=str, help="Tags records in the DATA table's 'run_tag' column with a run label for comparison testing (allows duplication of file+chunk).")
 parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+parser.add_argument(
+    '--log_level',
+    type=str,
+    default='INFO',  # Default is INFO
+    choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],  # Valid choices
+    help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) (default: %(default)s)."
+)
+parser.add_argument(
+    '--skip_key_check',
+    action='store_true',
+    help="Skip API key check (use for models that don't require keys, alternatively you can set OPENROUTER_API_KEY in .env to any non-empty value.)."
+)
+
 args = parser.parse_args()
+
+# Configure logging based on the command-line argument
+log_level = getattr(logging, args.log_level.upper())
+
+# Get the root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(log_level) 
+
+class InfoFormatter(logging.Formatter):
+    def format(self, record):
+        if record.levelname == 'INFO':
+            return record.getMessage()
+        return super().format(record)
+
+handler = logging.StreamHandler()
+handler.setFormatter(InfoFormatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+root_logger.addHandler(handler)
+
 
 config = ConfigLoader.load_config(args.config)
 
@@ -193,7 +219,14 @@ load_dotenv()
 # Get environment variables
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
-
+if not OPENROUTER_API_KEY and not args.skip_key_check:
+    error_message = (
+        "API key is missing. Either set the OPENROUTER_API_KEY environment variable, "
+        "or use --skip_key_check if the model does not require an API key."
+    )
+    logging.error(error_message)
+    sys.exit(1)  # Or handle differently
+    
 @dataclass
 class Column:
     name: str

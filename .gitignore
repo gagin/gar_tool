@@ -1,0 +1,6 @@
+.env
+public_art_vancouver/
+*.csv
+.last_timestamp
+.obsidian
+
