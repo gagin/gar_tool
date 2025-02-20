@@ -17,7 +17,7 @@ import threading
 import time
 import logging
 
-VERSION = '0.1.9' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.10' # requires major.minor.patch notation for auto-increment on commits via make command
 
 @dataclass
 class ExtractorDefaults:
@@ -136,8 +136,7 @@ def check_duplicate_args(argv): # Checks for duplicate named arguments and exits
         if arg.startswith('--'):  # Named argument
             if arg in seen_args:
                 logging.error(f"Error: Duplicate argument '{arg}' found.")
-                sys.exit(1)  # Exit with an error code
-            else:
+                sys.exit(1)
                 seen_args.add(arg)
 
 check_duplicate_args(sys.argv)
@@ -173,7 +172,6 @@ args = parser.parse_args()
 # Configure logging based on the command-line argument
 log_level = getattr(logging, args.log_level.upper())
 
-# Get the root logger
 root_logger = logging.getLogger()
 root_logger.setLevel(log_level) 
 
@@ -282,7 +280,7 @@ class Database:
         self.analyzer = analyzer
         self.run_tag = run_tag
         self.connection = None
-        self.schema = self._create_schema() #Create schema here.
+        self.schema = self._create_schema()
 
     def __enter__(self):
         self.connect()
@@ -327,7 +325,7 @@ class Database:
             results_columns.append(Column(db_column, 'TEXT'))
         
         if self.connection is None:
-            self.connect() #connect so cursor can be created.
+            self.connect() # connect so cursor can be created.
         
         return {
             'FCHUNKS': Table(
@@ -349,11 +347,11 @@ class Database:
             )
         }
     
-    def create_indexes(self): # New method to create indexes
+    def create_indexes(self):
         cursor = self.connection.cursor()
         try:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)')
-            cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON {self.analyzer.query_config.results_table}(file, chunknumber, run_tag)')  # Added run_tag to index
+            cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON {self.analyzer.query_config.results_table}(file, chunknumber, run_tag)')
             self.connection.commit()
         except sqlite3.OperationalError as e:
             logging.error(f"Error creating indexes: {e}")
@@ -551,16 +549,71 @@ def get_llm_response(content: str, prompt: str) -> Tuple[Optional[str], str]:
         logging.exception(f"Unexpected error: {e}")
         return None, f"Unexpected error: {e}"
     
+
+def _aggressive_json_cleaning(response: str) -> str:
+    """Attempts aggressive ```json extraction, falling back to super-aggressive cleaning."""
+    match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
+    if match:
+        try:
+            json_string = match.group(1).strip()
+            json.loads(json_string)
+            logging.debug("Aggressive JSON extraction from ```json block successful.")
+            return json_string
+        except json.JSONDecodeError as e:
+            logging.debug(f"Aggressive JSON decode error: {e}. Falling back to super-aggressive cleaning. Raw response: {response[:LLM_DEBUG_EXCERPT_LENGTH]}")
+            return _super_aggressive_json_cleaning(response)  # Call super-aggressive
+        except Exception as e:
+            logging.error(f"Unexpected error during aggressive ```json extraction: {e}")
+            return response
+    else: # If no match for ```json block
+        return _super_aggressive_json_cleaning(response)  # Call super-aggressive
+
+def _super_aggressive_json_cleaning(response: str) -> str:
+    """Attempts super-aggressive curly braces cleaning."""
+    try:
+        start = response.find('{')
+        end = response.rfind('}')
+        if start != -1 and end != -1:
+            super_aggressive_cleaned_response = response[start:end + 1]
+            try:
+                json.loads(super_aggressive_cleaned_response)
+                logging.debug("Super-aggressive JSON cleaning helped.")
+                logging.debug(f"Super-aggressively cleaned response: {super_aggressive_cleaned_response[:LLM_DEBUG_EXCERPT_LENGTH]}...")
+                return super_aggressive_cleaned_response
+            except json.JSONDecodeError as e:
+                logging.error(f"Super-aggressive JSON cleaning failed: {e}. Raw response: {response[:LLM_DEBUG_EXCERPT_LENGTH]}")
+                return response
+        else:
+            logging.error("Could not find JSON braces in the response.")
+            return response
+    except Exception as e:
+        logging.error(f"Unexpected error during super-aggressive cleaning: {e}")
+        return response
+
+
 def clean_json_response(response: str) -> str:
-    """Trims JSON response from the model"""
+    """Cleans the LLM response to extract JSON, using aggressive and super-aggressive cleaning as fallbacks."""
+
     if not response:
         return response
-        
-    response = re.sub(r'^```json\s*', '', response.strip())
-    response = re.sub(r'^```\s*', '', response.strip())
-    response = re.sub(r'\s*```$', '', response.strip())
-    
-    return response.strip()
+
+    # 1. Original Extraction
+    cleaned_response = re.sub(r'^```json\s*', '', response.strip(), flags=re.MULTILINE)
+    cleaned_response = re.sub(r'^```\s*', '', cleaned_response, flags=re.MULTILINE)
+    cleaned_response = re.sub(r'\s*```$', '', cleaned_response, flags=re.MULTILINE)
+    cleaned_response = cleaned_response.strip()
+
+    try:
+        json.loads(cleaned_response)
+        return cleaned_response
+    except json.JSONDecodeError as e:
+        logging.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. Raw response: {response[:LLM_DEBUG_EXCERPT_LENGTH]}")
+        return _aggressive_json_cleaning(response)  # Call aggressive cleaning
+
+
+    except Exception as e:
+        logging.error(f"Unexpected error during initial cleaning: {e}")
+        return response
 
 def calculate_chunks(filename: str) -> List[Tuple[int, int]]:
     try:
@@ -731,8 +784,10 @@ def main():
     start_iso = get_current_timestamp_iso()
 
     logging.info("Welcome! Check README at Github for useful prompt engineering tips")
-    logging.info(f"Start run at UTC {start_iso}")
-    logging.info("Using configuration:")
+    logging.info(f"Version {VERSION} started run at UTC {start_iso}")
+    if args.run_tag:
+        logging.info(f"Run Tag: {args.run_tag}")
+    logging.info("\nUsing configuration:")
     logging.info(f"Database: {RESULTS_DB}")
     logging.info(f"Context window: {CONTEXT_WINDOW}")
     logging.info(f"Temperature: {TEMPERATURE}")
@@ -740,7 +795,7 @@ def main():
     logging.info(f"Timeout: {TIMEOUT}")
     logging.info(f"Data folder: {DATA_FOLDER}")
     logging.info(f"Max failures: {MAX_FAILURES}")
-    logging.info(f"Model: {MODEL}")
+    logging.info(f"Model: {MODEL}\n\nPress Ctrl-C to stop the run (you can continue later)\n")
 
     if not os.path.exists(DATA_FOLDER):
         logging.error("Data folder does not exist")
