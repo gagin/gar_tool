@@ -17,7 +17,7 @@ import threading
 import time
 import logging
 
-VERSION = '0.1.6' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.7' # requires major.minor.patch notation for auto-increment on commits via make command
 
 @dataclass
 class ExtractorDefaults:
@@ -165,7 +165,7 @@ parser.add_argument(
 parser.add_argument(
     '--skip_key_check',
     action='store_true',
-    help="Skip API key check (use for models that don't require keys, alternatively you can set OPENROUTER_API_KEY in .env to any non-empty value.)."
+    help="Skip API key check (use for models that don't require keys, alternatively you can set OPENROUTER_API_KEY in .env to any non-empty value)."
 )
 
 args = parser.parse_args()
@@ -226,7 +226,7 @@ if not OPENROUTER_API_KEY and not args.skip_key_check:
     )
     logging.error(error_message)
     sys.exit(1)  # Or handle differently
-    
+
 @dataclass
 class Column:
     name: str

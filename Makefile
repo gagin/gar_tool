@@ -1,8 +1,8 @@
-COMMIT_MESSAGE ?= "Updated changes to $(shell git describe --tags --always)"
+COMMIT_MESSAGE ?= $(strip Updated changes to $(shell git describe --tags --always))
 
 commit:
-	git add .
-	git commit -m "$(strip $(COMMIT_MESSAGE))"
+	git add --update
+	git commit -m "$(COMMIT_MESSAGE)"
 
 .PHONY: commit default
 

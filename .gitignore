@@ -1,4 +1,7 @@
 .env
+.DS_Store
+.gitignore
+*/.DS_Store
 public_art_vancouver/
 *.csv
 .last_timestamp

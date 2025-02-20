@@ -327,9 +327,10 @@ It appears to run fine with two parallel instances and even while inspecting the
 Here are the available command-line options:
 
 ```bash
-python batch_doc_analyzer.py --help
-usage: batch_doc_analyzer.py [-h] [--context_window CONTEXT_WINDOW] [--temperature TEMPERATURE] [--debug_sample_length DEBUG_SAMPLE_LENGTH] [--timeout TIMEOUT] [--data_folder DATA_FOLDER] [--results_db RESULTS_DB]
-                             [--config CONFIG] [--max_failures MAX_FAILURES] [--model MODEL] [--provider PROVIDER] [--run_tag LABEL]
+python batch_doc_analyzer.py --help               
+usage: batch_doc_analyzer.py [-h] [--context_window CONTEXT_WINDOW] [--temperature TEMPERATURE] [--llm_debug_excerpt_length LLM_DEBUG_EXCERPT_LENGTH] [--timeout TIMEOUT] [--data_folder DATA_FOLDER]
+                             [--results_db RESULTS_DB] [--config CONFIG] [--max_failures MAX_FAILURES] [--model MODEL] [--provider PROVIDER] [--run_tag RUN_TAG] [--version]
+                             [--log_level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--skip_key_check]
 
 Process data with configurable constants.
 
@@ -339,19 +340,23 @@ options:
                         Context window size (in tokens). Files exceeding this size will be split into chunks.
   --temperature TEMPERATURE
                         Temperature for model generation (0.0 to 1.0). Higher values increase creativity. Defaults to 0 for predictable categorization. DeepSeek recommends 0.6 for more creative tasks.
-  --debug_sample_length DEBUG_SAMPLE_LENGTH
-                        Maximum length of model response displayed in the console for debugging.
+  --llm_debug_excerpt_length LLM_DEBUG_EXCERPT_LENGTH
+                        Maximum length (characters) of LLM response excerpt displayed in debug logs (default: 200).
   --timeout TIMEOUT     Timeout (in seconds) for requests to the LLM API.
   --data_folder DATA_FOLDER
-                        Path to the directory containing the text files to process (no trailing slash).
+                        Path to the directory containing the text files to process.
   --results_db RESULTS_DB
                         Name of the SQLite database file to store results. If not specified, the project name from config.yaml is used.
-  --config CONFIG       Path to the YAML configuration file containing extraction parameters.
+  --config CONFIG       Path to the YAML configuration file containing extraction parameters (default: config.yaml).
   --max_failures MAX_FAILURES
                         Maximum number of failures allowed for a chunk before it is skipped.
   --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
   --provider PROVIDER   Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.
   --run_tag RUN_TAG     Tags records in the DATA table's 'run_tag' column with a run label for comparison testing (allows duplication of file+chunk).
+  --version             show program's version number and exit
+  --log_level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
+                        Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) (default: INFO).
+  --skip_key_check      Skip API key check (use for models that don't require keys, alternatively you can set OPENROUTER_API_KEY in .env to any non-empty value).
 ```
 
 ## <a id="trouble"></a>Troubleshooting
