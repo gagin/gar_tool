@@ -17,7 +17,7 @@ import threading
 import time
 import logging
 
-VERSION = '0.1.8' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.9' # requires major.minor.patch notation for auto-increment on commits via make command
 
 @dataclass
 class ExtractorDefaults:
@@ -328,10 +328,6 @@ class Database:
         
         if self.connection is None:
             self.connect() #connect so cursor can be created.
-            
-        #cursor = self.connection.cursor()
-        #cursor.execute('CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)')
-        #cursor.execute('CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON DATA(file, chunknumber)')
         
         return {
             'FCHUNKS': Table(
@@ -353,6 +349,16 @@ class Database:
             )
         }
     
+    def create_indexes(self): # New method to create indexes
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)')
+            cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON {self.analyzer.query_config.results_table}(file, chunknumber, run_tag)')  # Added run_tag to index
+            self.connection.commit()
+        except sqlite3.OperationalError as e:
+            logging.error(f"Error creating indexes: {e}")
+            logging.warning("Continuing without indexes. Performance may be degraded.")
+
     def chunk_exists(self, filename: str) -> bool:
         cursor = self.connection.cursor()
         cursor.execute(
@@ -753,6 +759,7 @@ def main():
     )
 
     with Database(analyzer, args.run_tag) as db:
+        db.create_indexes() # Create indexes after connecting to the database.
         signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
         
         try:

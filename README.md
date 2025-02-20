@@ -14,6 +14,7 @@ This command-line tool helps you extract specific information from large collect
 - [Command-Line Options](#cli)
 - [Troubleshooting](#trouble)
 - [Credits](#credits)
+- [Alternative Solutions](#alternatives)
 - [To-Do](#to-do)
 
 ## <a id="key-features"></a>Key Features
@@ -370,6 +371,26 @@ options:
 
 Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing small portions. Expect potential code problems. This is an analyst's tool, not professional software. Gemini was also hugely helpful with this document.
 
+## <a id="alternatives"></a>Alternative Solutions
+
+### Web UI apps for the Exact Same Use Case
+
+* **Extracta.ai:** [Extracta.ai](https://extracta.ai/extract-data-from-pdf-to-excel-using-ai/) offers a web UI-based solution for data extraction, targeting the same use case as this project. Users can upload batches of files, define fields, and view extracted results in a table. For reference, the field descriptions used with Extracta.ai were derived from the configuration used in this project. Screenshots of the Extracta.ai UI and an example CSV export (run over the same data as our demo) are available in the `competitors_extracta.ai` folder. While convenient, the web-based nature and limited control over configuration compared to local file management and version control make our tool preferable for projects requiring reproducible results and configurable prompts.
+
+* **ExtractNinja:** [ExtractNinja](https://extractninja.org/) is another web UI-based platform for data extraction, with a similar interface and feature set to Extracta.ai. 
+
+### Developer Frameworks
+
+* **KatanaML/Sparrow**: Sparrow ([GitHub](https://github.com/katanaml/sparrow)) is an open-source solution focused on vision-language models (VLMs - models that understand both images and text) and local LLM execution. For streamlined bulk LLM extraction from a large collection of similarly structured text files, its setup and configuration requirements are unclear from a quick glance. Their UI ([https://sparrow.katanaml.io/](https://sparrow.katanaml.io/)) can give you a sense of its capabilities, but full access requires an API key. Local installation is an option for users comfortable managing virtual environments and heavy packages.
+
+* **LlamaIndex:** For developers seeking a more programmatic approach, LlamaIndex ([LlamaIndex Documentation](https://docs.llamaindex.ai/en/stable/understanding/extraction/)) offers tools for structured output extraction. Our script could have been built on it. However, it provides a framework rather than a ready-to-use solution, requiring further development and integration to achieve a complete extraction pipeline.
+
+### Enterprise-Level Solutions
+
+* **Altair Monarch:** [Monarch](https://web.altair.com/monarch-free-trial) is an enterprise-level self-service data preparation tool designed for business users. It connects to various data sources (PDFs, spreadsheets, databases, cloud data, big data) and provides functions to prepare and transform data from disparate sources into rows and columns for use in reporting and analytics.
+
+* **Google Cloud Document AI:** Google Cloud Document AI ([cloud.google.com/document-ai](https://cloud.google.com/document-ai)) is another enterprise-grade solution targeting this use case, among others.
+
 ## <a id="to-do"></a>To-Do
 
 - **Handle varied model output:** Some models like LLama 70B Nemotron might add prefixes like "Here's the JSON:" to their responses, we could try to handle that. Ideally, we should also explore using [structured outputs](https://platform.openai.com/docs/guides/function-calling) for models that support them for better reliability and potentially fewer tokens / lower cost. Right now, our JSON prompting works and supports more models (including local ones). 
@@ -400,8 +421,5 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - advisable to have single-doc directory in default config.yaml, and provide full directory via --data_folder to avoid costs on mistakenly triggered runs
 - version_update, pre-commit and install_hooks - don't worry about it unless you change the script and want to have auto-increments to version
 - implement db indexes
-- Note: https://docs.llamaindex.ai/en/stable/understanding/extraction/ provides tooling to call structural outputs, but it's frameworks, not a ready to use solution; and here's a solution, but not clear if it supports bulk https://github.com/katanaml/sparrow
-- Very similar solution is implemented at https://extracta.ai/extract-data-from-pdf-to-excel-using-ai/ - but with web UI and pdf support. Upload batch of files, describe fields, see table with extracted results. You can see in a folder above how it was configured using prompts in our config, and what was the result. Our tool is preferable to web UI if you want manageable field configuration files and comparison tests.
-- Another option with UI - https://extractninja.org/, and this one seems more enterprisey https://web.altair.com/monarch-free-trial (via this discussion https://www.reddit.com/r/ProductivityApps/comments/1bp0hk4/ai_tool_for_bulk_extraction_of_data_from_pdfs/), and speaking of enterprisey - https://cloud.google.com/document-ai
 - In our approach is document is fed to LLM independently, thus ignoring information that is in commonality between files. For a human eyes, extracting fields from several files will result in next ones being processed faster and with better quality. It unclear though how to technically achieve a similar effect with a model.
 
