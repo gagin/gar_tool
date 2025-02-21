@@ -16,7 +16,7 @@ import requests.exceptions
 #import time
 import logging, traceback
 
-VERSION = '0.1.13' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.14' # requires major.minor.patch notation for auto-increment on commits via make command
 MAX_FAILURES_LIMIT = 5
 
 @dataclass
@@ -366,7 +366,7 @@ class ProcessingResult:
 
 
 class Database:
-    def __init__(self, config: ExtractorConfig):
+    def __init__(self, config: ExtractorConfig): # This is init of the db object, not the db file
         self.config = config
         self.connection = None
 
@@ -374,6 +374,7 @@ class Database:
         self.connect()
         self.schema = self._create_schema()
         self.init_tables()
+        self.create_indexes() # Create indexes after connecting to the database.
         return self
         
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -1109,7 +1110,6 @@ def main():
 
     with Database(config) as db:
         analyzer = DocumentAnalyzer(config, db)
-        db.create_indexes() # Create indexes after connecting to the database.
         signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
         
         try:

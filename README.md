@@ -329,35 +329,43 @@ Here are the available command-line options:
 
 ```bash
 python batch_doc_analyzer.py --help               
-usage: batch_doc_analyzer.py [-h] [--context_window CONTEXT_WINDOW] [--temperature TEMPERATURE] [--llm_debug_excerpt_length LLM_DEBUG_EXCERPT_LENGTH] [--timeout TIMEOUT] [--data_folder DATA_FOLDER]
-                             [--results_db RESULTS_DB] [--config CONFIG] [--max_failures MAX_FAILURES] [--model MODEL] [--provider PROVIDER] [--run_tag RUN_TAG] [--version]
-                             [--log_level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--skip_key_check]
+usage: batch_doc_analyzer.py [-h] [--config CONFIG] [--llm_debug_excerpt_length LLM_DEBUG_EXCERPT_LENGTH] [--log_level {DEBUG,INFO,WARNING,ERROR,CRITICAL}] [--version]
+                             [--data_folder DATA_FOLDER] [--chunk_size CHUNK_SIZE] [--results_db RESULTS_DB] [--model MODEL] [--provider PROVIDER] [--skip_key_check]
+                             [--temperature TEMPERATURE] [--run_tag RUN_TAG] [--timeout TIMEOUT] [--max_failures MAX_FAILURES]
 
-Process data with configurable constants.
+This command-line tool extracts specific information from large collections of text files and organizes it into a spreadsheet within a database, using Large Language Models (LLMs). It's designed to assist with data that was once structured but is now in plain text, or when deriving new insights from unstructured information. Ideal for data analysts and researchers who need to convert unstructured or semi-structured text into analyzable data.
 
 options:
   -h, --help            show this help message and exit
-  --context_window CONTEXT_WINDOW
-                        Context window size (in tokens). Files exceeding this size will be split into chunks.
-  --temperature TEMPERATURE
-                        Temperature for model generation (0.0 to 1.0). Higher values increase creativity. Defaults to 0 for predictable categorization. DeepSeek recommends 0.6 for more creative tasks.
-  --llm_debug_excerpt_length LLM_DEBUG_EXCERPT_LENGTH
-                        Maximum length (characters) of LLM response excerpt displayed in debug logs (default: 200).
-  --timeout TIMEOUT     Timeout (in seconds) for requests to the LLM API.
-  --data_folder DATA_FOLDER
-                        Path to the directory containing the text files to process.
-  --results_db RESULTS_DB
-                        Name of the SQLite database file to store results. If not specified, the project name from config.yaml is used.
+
+Script control:
   --config CONFIG       Path to the YAML configuration file containing extraction parameters (default: config.yaml).
-  --max_failures MAX_FAILURES
-                        Maximum number of failures allowed for a chunk before it is skipped.
-  --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
-  --provider PROVIDER   Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Defaults to OpenRouter.
-  --run_tag RUN_TAG     Tags records in the DATA table's 'run_tag' column with a run label for comparison testing (allows duplication of file+chunk).
-  --version             show program's version number and exit
+  --llm_debug_excerpt_length LLM_DEBUG_EXCERPT_LENGTH
+                        Maximum length (in characters) of LLM response excerpts displayed in debug logs (default: 200).
   --log_level {DEBUG,INFO,WARNING,ERROR,CRITICAL}
                         Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) (default: INFO).
-  --skip_key_check      Skip API key check (use for models that don't require keys, alternatively you can set OPENROUTER_API_KEY in .env to any non-empty value).
+  --version             Show program's version number and exit.
+
+Input and output (command line overwrites values from configuration YAML file):
+  --data_folder DATA_FOLDER
+                        Path to the directory containing the text files to process.
+  --chunk_size CHUNK_SIZE
+                        Chunk size (in characters). Files exceeding this size will be split into chunks. The combined chunk and prompt must fit within the model's context window (measured in tokens, not characters). Token length varies by language. See the README for details.
+  --results_db RESULTS_DB
+                        Name of the SQLite database file to store results. Be careful, the extension '.db' is not added automatically. If this argument is not specified, the project name from the YAML configuration file is used.
+
+AI parameters (command line overwrites values from configuration YAML file):
+  --model MODEL         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
+  --provider PROVIDER   Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1'). Default: OpenRouter.
+  --skip_key_check      Skip API key check (use for models that don't require keys, or set OPENROUTER_API_KEY in .env to any non-empty value).
+  --temperature TEMPERATURE
+                        Temperature for model generation (0.0 to 1.0). Higher values increase creativity. A value of 0 is recommended for predictable document processing.
+
+Run parameters (command line overwrites values from configuration YAML file):
+  --run_tag RUN_TAG     Tags records in the DATA table's 'run_tag' column with a run label for comparison testing (allowing duplication of file and chunk combinations). Use this to differentiate runs based on model name, field order, temperature, or other variations. Default: file name of the YAML configuration.
+  --timeout TIMEOUT     Timeout (in seconds) for requests to the LLM API.
+  --max_failures MAX_FAILURES
+                        Maximum number of consecutive failures allowed for a chunk before it is skipped.
 ```
 
 ## <a id="trouble"></a>Troubleshooting
@@ -413,18 +421,17 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - rewrite your prompt with sota models
 - boolean: 1, yes or true - tell the model notation to use
 - universal value for not found - tell the model notation to use
-- locked: not even on edit, even on order change
 - Ask the model to do things rather than avoid things (instead of don't hallucinate, say ground answers in the document provided and ignore coincidences with real world)
 - advisable to have single-doc directory in default config.yaml, and provide full directory via --data_folder to avoid costs on mistakenly triggered runs
 - version_update, pre-commit and install_hooks - don't worry about it unless you change the script and want to have auto-increments to version
 - In our approach is document is fed to LLM independently, thus ignoring information that is in commonality between files. For a human eyes, extracting fields from several files will result in next ones being processed faster and with better quality. It unclear though how to technically achieve a similar effect with a model. Idea: after each call, do another call with full response csv (current run or length-limited total) and ask model either to normalise, or to provide a feedback on the last addition if needed - and if there is a feedback, rerun extraction model with this comment. Sounds as a fun agentic trick, worthy to implement just for kicks. Even though it doesn't fully solve the original problem. Another agentic trick - first feeds several documents at once to a strong model with our prompt and ask for prompt improvements based on similarity of these documents, and use the improved one.
+- explain that run_tag defailts to config file name, and how it can be used for model name and other parameters
 
 ### Technical
 - is required:false used, does it even make sense?
-- should run_tag default to config file name? - yes, and mention in document, that it can also be used, for example, for model names, if these are compared
 - do i want to keep folder name? additional field without folder name?
 - implement multi-run with N of M?
-- investigate Error processing chunk: Invalid \escape: 
+- investigate Error processing chunk: Invalid \escape: (happened when original doc had several backslashes as a placeholder, and then model was returning it and did not escape properly)
 - --structured_output=true/false/test with test is default
 - Make a temp table where script instances will register which piece they picked up for processing - this way it'll be much less likely to pick same piece multiple times, as it happens now when between random pick and record there's LLM response wait time
 
