@@ -7,8 +7,8 @@ defaults:
   temperature: 0
   timeout: 30
   data_folder: ./art-G
-  max_failures: 2  # Maximum number of failures per chunk
-  model: google/gemini-2.0-flash-001:floor
+  max_failures: 1  # Maximum number of failures per chunk
+  model: google/gemini-2.0-flash-001:floor # cheapest one for tests - meta-llama/llama-3.2-1b-instruct:floor - expect to fail
   provider: https://openrouter.ai/api/v1
 
 # Node definitions

@@ -1,8 +1,6 @@
 import sqlite3
-import os
+import os, sys, stat
 import signal
-import sys
-import stat
 import yaml
 import argparse
 from argparse import Namespace
@@ -11,15 +9,14 @@ import random
 import re
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple, SupportsFloat
+from typing import List, Optional, Dict, Any, Tuple, SupportsFloat, Callable
 from dotenv import load_dotenv
 import requests
 import requests.exceptions
-import threading
-import time
-import logging
+#import time
+import logging, traceback
 
-VERSION = '0.1.12' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.13' # requires major.minor.patch notation for auto-increment on commits via make command
 MAX_FAILURES_LIMIT = 5
 
 @dataclass
@@ -145,8 +142,8 @@ class ConfigLoader:
                 API key is missing. Either set the OPENROUTER_API_KEY environment variable,
                 or use --skip_key_check if the model does not require an API key.
                 """)
-            logging.error(error_message)  # Log the error
-            raise ValueError(error_message) # Raise an exception to stop execution
+            logging.error(error_message)
+            sys.exit(1) 
         
     @staticmethod
     def load_config_file(config_path: str) -> ExtractorConfig:
@@ -194,9 +191,13 @@ class ConfigLoader:
             )
             
         except FileNotFoundError:
-            raise ValueError(f"Configuration file not found: {config_path}")
+            logging.error(f"Configuration file not found: {config_path}")
+            sys.exit(1)
+            # raise ValueError(f"Configuration file not found: {config_path}")
         except yaml.YAMLError as e:
-            raise ValueError(f"Invalid YAML in configuration file: {e}")
+            logging.error(f"Invalid YAML in configuration file: {e}")
+            sys.exit(1)
+            # raise ValueError(f"Invalid YAML in configuration file: {e}")
 
 def check_duplicate_args(argv): # Checks for duplicate named arguments and exits with an error if found.
     seen_args = set()
@@ -223,6 +224,11 @@ def parse_arguments() -> Namespace:
 
     config_group_control = parser.add_argument_group("Script control")
     
+    config_group_control.add_argument('--config', type=str, default='config.yaml', help=collapse_whitespace("""
+        Path to the YAML configuration file containing extraction
+        parameters (default: %(default)s).
+    """))
+    
     config_group_control.add_argument('--llm_debug_excerpt_length', type=int, default=200, help=collapse_whitespace("""
         Maximum length (in characters) of LLM response excerpts displayed
         in debug logs (default: %(default)s).
@@ -235,11 +241,6 @@ def parse_arguments() -> Namespace:
 
     config_group_control.add_argument("--version", action="version", version=f"%(prog)s {VERSION}", help=collapse_whitespace("""
         Show program's version number and exit.
-    """))
-
-    config_group_control.add_argument('--config', type=str, default='config.yaml', help=collapse_whitespace("""
-        Path to the YAML configuration file containing extraction
-        parameters (default: %(default)s).
     """))
 
     # Configuration from YAML file
@@ -257,8 +258,8 @@ def parse_arguments() -> Namespace:
     """))
 
     config_group_io.add_argument('--results_db', type=str, help=collapse_whitespace("""
-        Name of the SQLite database file to store results. If not
-        specified, the project name from the YAML configuration file
+        Name of the SQLite database file to store results. Be careful, the extension '.db' is not added automatically. 
+        If this argument is not specified, the project name from the YAML configuration file
         is used.
     """))
 
@@ -290,6 +291,7 @@ def parse_arguments() -> Namespace:
         label for comparison testing (allowing duplication of
         file and chunk combinations).  Use this to differentiate
         runs based on model name, field order, temperature, or other variations.
+        Default: file name of the YAML configuration.
     """))
 
     config_group_run.add_argument('--timeout', type=int, help=collapse_whitespace("""
@@ -314,7 +316,7 @@ def setup_logger(log_level: str):  # Takes log level as string
             return super().format(record)
 
     handler = logging.StreamHandler()
-    handler.setFormatter(InfoFormatter('%(asctime)s - %(levelname)s - %(message)s')) # removed name, there's only root here
+    handler.setFormatter(InfoFormatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')) # removed name, there's only root here
     root_logger.addHandler(handler)
 
 @dataclass
@@ -362,15 +364,11 @@ class ProcessingResult:
     extracted_data: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
 
-class DocumentAnalyzer:
-    def __init__(self, config: ExtractorConfig):
-        self.config = config
 
 class Database:
-    def __init__(self, analyzer: DocumentAnalyzer):
-        self.analyzer = analyzer
+    def __init__(self, config: ExtractorConfig):
+        self.config = config
         self.connection = None
-
 
     def __enter__(self):
         self.connect()
@@ -384,71 +382,117 @@ class Database:
             self.connection = None
             
     def connect(self):
-        db_path = self.analyzer.config.results_db
+        db_path = self.config.results_db
 
         try:
+            # Initial connection attempt
             self.connection = sqlite3.connect(db_path)
-            return self.connection
+            self._debug_log_busy_timeout()
 
-        except sqlite3.OperationalError as e:
-            if hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_LOCKED:
-                msg = f"The database file '{db_path}' is locked. Underlying error: {e}"
-                logging.error(msg)
-                raise sqlite3.OperationalError(msg)
+            # Check database integrity immediately after connection
+            cursor = self.connection.cursor()
+            cursor.execute("PRAGMA integrity_check;")
+            result = cursor.fetchone()
+            if result[0] != 'ok':
+                self.connection.close()
+                logging.error(f"The file '{db_path}' is not a valid SQLite database (integrity check failed). Error: {result[0]}")
+                sys.exit(1)
 
-            elif hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_CORRUPT:
-                msg = f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}"
-                logging.error(msg)
-                raise sqlite3.DatabaseError(msg)
+            return self.connection  # Return connection only if successful and integrity check passes
 
+        except sqlite3.OperationalError as e:  # Catch specific OperationalErrors
+            self.connection = None # Ensure connection is None if it failed.
             if os.path.isdir(db_path):
-                msg = f"The path '{db_path}' is a directory, not a file."
-                logging.error(msg)
-                raise IsADirectoryError(msg)
+                logging.error(f"The path '{db_path}' is a directory, not a file.")
+                sys.exit(1)
 
-            try:  # Check permissions on the file using os.stat
+            try:
                 mode = os.stat(db_path).st_mode
                 if not (stat.S_IREAD & mode and stat.S_IWRITE & mode):
-                    msg = f"The file '{db_path}' does not have read and write permissions."
-                    logging.error(msg)
-                    raise PermissionError(msg)
-            except Exception as perm_e:  # Catch any exception during permission check
-                msg = f"An unexpected error occurred when checking file permissions: {perm_e}"
-                logging.error(msg)
-                raise perm_e
+                    logging.error(f"The file '{db_path}' does not have read and write permissions.")
+                    sys.exit(1)
+            except FileNotFoundError:  # Handle the case where the file doesn't exist
+                logging.error(f"The file '{db_path}' was not found.")
+                sys.exit(1)
+            except Exception as perm_e:
+                logging.error(f"An unexpected error occurred when checking file permissions: {perm_e}")
+                raise  # Re-raise for higher-level handling
 
-
-            try:  # Check permissions on the *parent* directory (using os.access)
+            try:
                 parent_dir = os.path.dirname(db_path)
-                if not os.access(parent_dir, os.W_OK):  # Check write access to parent
-                    msg = f"The directory '{parent_dir}' does not have write permissions."
-                    logging.error(msg)
-                    raise PermissionError(msg)
+                if not os.access(parent_dir, os.W_OK):
+                    logging.error(f"The directory '{parent_dir}' does not have write permissions.")
+                    sys.exit(1)
             except Exception as dir_perm_e:
-                msg = f"An unexpected error occurred when checking directory permissions: {dir_perm_e}"
-                logging.error(msg)
-                raise dir_perm_e
+                logging.error(f"An unexpected error occurred when checking directory permissions: {dir_perm_e}")
+                raise  # Re-raise
 
+            logging.error(f"An OperationalError occurred: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
+            sys.exit(1) # Exit after logging the error
 
-            # If none of the above, re-raise the original OperationalError
-            msg = f"An OperationalError occurred: {e}"
-            logging.error(msg)
-            raise
+        except sqlite3.DatabaseError as e:  # Catch other DatabaseErrors
+            logging.error(f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
+            sys.exit(1)
 
-        except sqlite3.DatabaseError as e:
-            msg = f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}"
-            logging.error(msg)
-            raise sqlite3.DatabaseError(msg)
-
+        except Exception as e:  # Catch any other unexpected exceptions
+            logging.exception(f"An unexpected error occurred: {e}") # Use logging.exception to include traceback
+            raise  # Re-raise the exception after logging
+        
+    def _debug_log_busy_timeout(self):  # Private helper method
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            try:
+                cursor = self.connection.cursor()
+                cursor.execute("PRAGMA busy_timeout;")
+                timeout = cursor.fetchone()[0]
+                logging.debug(f"SQLite busy_timeout: {timeout} ms")
+            except sqlite3.Error as e:
+                logging.error(f"Error getting busy_timeout: {e}")
+                
+    def _execute(self, cursor: sqlite3.Cursor, operation: Callable, query: str, params: Any = None) -> Tuple[bool, Optional[int]]:
+        """Generic wrapper for cursor.execute() and cursor.executemany().
+           Returns (success, lastrowid) where lastrowid is only available for execute.
+        """
+        lastrowid = None  # Initialize lastrowid
+        try:
+            if params is not None:
+                operation(query, params)
+                if operation == cursor.execute: # Only get lastrowid for single executes
+                    lastrowid = cursor.lastrowid
+            else:
+                operation(query)
+                if operation == cursor.execute: # Only get lastrowid for single executes
+                    lastrowid = cursor.lastrowid
+        except sqlite3.OperationalError as e:
+            if hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_LOCKED:
+                logging.error(f"Database locked: {e}")
+                sys.exit(1)
+            elif hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_BUSY:
+                logging.error(f"The database file is busy, do you have unsaved changes in DB Browser? [Operation returned: {e}]")
+                sys.exit(1)    
+            else:
+                logging.error(f"Database OperationalError: {e}")
+                sys.exit(1)
         except Exception as e:
-            msg = f"An unexpected error occurred: {e}"
-            logging.exception(msg)  # Log traceback
-            raise
+            logging.exception(f"An unexpected error occurred during database operation: {e}")
+            sys.exit(1)
+
+        return True, lastrowid  # Return True and lastrowid (or None)
+
+    def _execute_query(self, cursor: sqlite3.Cursor, query: str, params: Any = None) -> Tuple[bool, Optional[int]]:
+        """Wrapper for cursor.execute()."""
+        return self._execute(cursor, cursor.execute, query, params)
+
+    def _execute_many(self, cursor: sqlite3.Cursor, query: str, params: Any = None) -> bool: # Return just success for executemany
+        """Wrapper for cursor.executemany()."""
+        success, _ = self._execute(cursor, cursor.executemany, query, params)
+        return success
+
         
     def init_tables(self):
         cursor = self.connection.cursor()
         for table in self.schema.values():
-            cursor.execute(table.get_create_statement())
+            if not self._execute_query(cursor, table.get_create_statement()):
+                raise RuntimeError("Failed to create tables") # Or handle differently
         self.connection.commit()
     
     def _create_schema(self) -> Dict[str, Table]:
@@ -470,7 +514,7 @@ class Database:
             Column('run_tag', 'TEXT', nullable=True)
         ]
         
-        for json_node, db_column in self.analyzer.config.db_mapping.items():
+        for json_node, db_column in self.config.db_mapping.items():
             results_columns.append(Column(db_column, 'TEXT'))
         
         if self.connection is None:
@@ -491,7 +535,7 @@ class Database:
                 columns=request_log_columns
             ),
             'RESULTS': Table(
-                name=self.analyzer.config.results_table,
+                name=self.config.results_table,
                 columns=results_columns
             )
         }
@@ -499,12 +543,15 @@ class Database:
     def create_indexes(self):
         cursor = self.connection.cursor()
         try:
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)')
-            cursor.execute(f'CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON {self.analyzer.config.results_table}(file, chunknumber, run_tag)')
+            if not self._execute_query(cursor, 'CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)'):
+                logging.error("Failed to create index idx_request_log_file_chunk")
+            if not self._execute_query(cursor, f'CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON {self.config.results_table}(file, chunknumber, run_tag)'):
+                logging.error(f"Failed to create index idx_results_file_chunk")
             self.connection.commit()
-        except sqlite3.OperationalError as e:
+        except Exception as e:
             logging.error(f"Error creating indexes: {e}")
             logging.warning("Continuing without indexes. Performance may be degraded.")
+
 
     def chunk_exists(self, filename: str) -> bool:
         cursor = self.connection.cursor()
@@ -516,10 +563,13 @@ class Database:
     
     def insert_chunks(self, file: str, chunks: List[Tuple[int, int]]):
         cursor = self.connection.cursor()
-        cursor.executemany(
-            'INSERT INTO FCHUNKS (file, chunknumber, start, end) VALUES (?, ?, ?, ?)',
-            [(file, i, chunk[0], chunk[1]) for i, chunk in enumerate(chunks)]
-        )
+        query = 'INSERT INTO FCHUNKS (file, chunknumber, start, end) VALUES (?, ?, ?, ?)'
+        params = [(file, i, chunk[0], chunk[1]) for i, chunk in enumerate(chunks)]
+
+        if not self._execute_many(cursor, query, params):  # Use the new _execute_many
+            logging.error("Failed to insert chunks to the db")
+            sys.exit(1)
+
         self.connection.commit()
     
     def get_chunk_bounds(self, filename: str, chunk_number: int) -> Optional[Tuple[int, int]]:
@@ -530,12 +580,12 @@ class Database:
         )
         return cursor.fetchone()
     
-    def get_unprocessed_chunks(self, filename: str, results_table: str, start_iso: datetime, max_failures: int, run_tag: str = None) -> List[Tuple[str, int]]:
+    def get_unprocessed_chunks(self, filename: str, start_iso: datetime) -> List[Tuple[str, int]]:
         try:
             cursor = self.connection.cursor()
-            results_table = self.analyzer.config.results_table
+            results_table = self.config.results_table
 
-            if run_tag is not None:
+            if self.config.run_tag is not None:
                 # If run_tag is provided, check for file+chunk+run_tag duplicates and failure counts
                 sql_query = f'''
                     SELECT c.file, c.chunknumber
@@ -551,7 +601,7 @@ class Database:
                         HAVING COUNT(*) >= ?
                     )
                 '''
-                cursor.execute(sql_query, (run_tag, filename, start_iso, max_failures))
+                cursor.execute(sql_query, (self.config.run_tag, filename, start_iso, self.config.inconfig_values.max_failures))
             else:
                 # If no run_tag, perform the original file+chunk duplicate check and failure counts
                 sql_query = f'''
@@ -568,13 +618,51 @@ class Database:
                         HAVING COUNT(*) >= ?
                     )
                 '''
-                cursor.execute(sql_query, (filename, start_iso, max_failures))
+                cursor.execute(sql_query, (filename, start_iso, self.config.inconfig_values.max_failures))
 
             return cursor.fetchall()
         except sqlite3.OperationalError as e:
             logging.exception(f"Database error: {e}")
             return []
     
+    def log_request(self, file: str, chunk_number: int, result: ProcessingResult) -> int:
+        cursor = self.connection.cursor()
+        query = 'INSERT INTO REQUEST_LOG (file, chunknumber, timestamp, model, raw_response, success, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        params = (file, chunk_number, datetime.now(timezone.utc).isoformat(), self.config.inconfig_values.model, result.raw_response, result.success, result.error_message)
+
+        success, lastrowid = self._execute_query(cursor, query, params)  # Get both success and lastrowid
+
+        if not success:
+            logging.error("Failed to log request. Exiting.")  # Log the error
+            raise RuntimeError("Failed to log request: {e}")  # Raise an exception
+
+        self.connection.commit()
+        return lastrowid if lastrowid is not None else -1 # Return lastrowid or -1 on failure
+
+    def store_results(self, request_id: int, file: str, chunk_number: int, data: Dict[str, Any]):
+        cursor = self.connection.cursor()
+
+        columns = ['request_id', 'file', 'chunknumber']
+        values = [request_id, file, chunk_number]
+
+        for json_node, db_column in self.config.db_mapping.items():
+            if json_node in data:
+                columns.append(db_column)
+                values.append(data[json_node])
+
+        # Add run_tag if it exists
+        if self.config.run_tag is not None:
+            columns.append('run_tag')
+            values.append(self.config.run_tag)
+
+        placeholders = ','.join(['?' for _ in values])
+        query = f'INSERT INTO {self.config.results_table} ({",".join(columns)}) VALUES ({placeholders})'
+
+        if not self._execute_query(cursor, query, values):  # Use the wrapper
+            return  # Or raise an exception if you prefer
+
+        self.connection.commit()
+    '''    
     def log_request(self, file: str, chunk_number: int, 
                    model: str, result: ProcessingResult) -> int:
         cursor = self.connection.cursor()
@@ -595,30 +683,30 @@ class Database:
         columns = ['request_id', 'file', 'chunknumber']
         values = [request_id, file, chunk_number]
         
-        for json_node, db_column in self.analyzer.config.db_mapping.items():
+        for json_node, db_column in self.config.db_mapping.items():
             if json_node in data:
                 columns.append(db_column)
                 values.append(data[json_node])
 
         # Add run_tag if it exists
-        if self.analyzer.config.run_tag is not None:
+        if self.config.run_tag is not None:
             columns.append('run_tag')
-            values.append(self.run_tag)
+            values.append(self.config.run_tag)
         
         placeholders = ','.join(['?' for _ in values])
         cursor.execute(
-            f'INSERT INTO {self.analyzer.config.results_table} '
+            f'INSERT INTO {self.config.results_table} '
             f'({",".join(columns)}) VALUES ({placeholders})',
             values
         )
         self.connection.commit()
-    
+    '''   
     def close(self):
         if self.connection:
             self.connection.close()
             self.connection = None
 
-    def get_all_skipped_chunks_for_run(self, start_iso: datetime, end_iso: datetime, max_failures: int) -> List[Tuple[str, int]]:
+    def get_all_skipped_chunks_for_run(self, start_iso: datetime, end_iso: datetime) -> List[Tuple[str, int]]:
         """Get all chunks that are currently in failure timeout for a specific run."""
         cursor = self.connection.cursor()
 
@@ -629,287 +717,326 @@ class Database:
             AND timestamp >= ? AND timestamp <= ?
             GROUP BY file, chunknumber
             HAVING failures >= ?
-            ''', (start_iso, end_iso, max_failures))
+            ''', (start_iso, end_iso, self.config.inconfig_values.max_failures))
 
         return cursor.fetchall()
-
-def get_llm_response(content: str, prompt: str, config: ExtractorConfig) -> Tuple[Optional[str], str]:
-    global signal_received
-    if signal_received:
-        return None, "Request skipped due to interrupt."
     
-    try:
-        headers = {
-            "Authorization": f"Bearer {config.key}",
-            "Content-Type": "application/json"
-        }
+    def get_run_summary(self, start_iso: str, end_iso: str) -> str:
+        """Retrieves and formats the run summary details."""
+        all_skipped = self.get_all_skipped_chunks_for_run(start_iso, end_iso)
+        summary = ""
+        if all_skipped:
+            summary += "\nFinal summary of skipped chunks:\n"
+            for file, chunk, failures in all_skipped:
+                summary += f"- {file} chunk {chunk} ({failures} failures)\n"
 
-        data = {
-            "model": config.inconfig_values.model,
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": content}
-            ],
-            "temperature": config.inconfig_values.temperature
-        }
-
-        response = requests.post(
-            f"{config.inconfig_values.provider}/chat/completions",
-            headers=headers,
-            json=data,
-            timeout=config.inconfig_values.timeout
-        )
-
-        response.raise_for_status()
-
-        if signal_received:
-            return None, "Request interrupted after response, during processing"
-
-        logging.debug(f"Status code: {response.status_code}")
-        logging.debug(f"Raw response: {response.text.strip()[:config.excerpt]}")
-
-        if not response.text.strip():
-            return None, ""
-
-        response_data = response.json()
-
-        if 'choices' not in response_data or not response_data['choices']:
-            return None, json.dumps(response_data)
-
-        choice = response_data['choices'][0]
-        if 'message' not in choice or 'content' not in choice['message']:
-            return None, json.dumps(response_data)
-
-        return choice['message']['content'], json.dumps(response_data)
-
-    except requests.exceptions.RequestException as e:
-        logging.exception(f"Error making request to {config.inconfig_values.provider}: {e}")
-        return None, f"Request error: {e}"
-    except json.JSONDecodeError as e:
-        logging.exception(f"Error decoding JSON response: {e}")
-        return None, f"JSON decode error: {e}"
-    except KeyError as e:
-        logging.exception(f"KeyError in JSON response: {e}")
-        return None, f"Key error: {e}"
-    except requests.exceptions.HTTPError as e:
-        logging.exception(f"HTTP Error: {e}")
-        return None, f"HTTP Error: {e}"
-    except Exception as e:
-        logging.exception(f"Unexpected error: {e}")
-        return None, f"Unexpected error: {e}"
-    
-
-def _aggressive_json_cleaning(response: str, excerpt: int) -> str:
-    """Attempts aggressive ```json extraction, falling back to super-aggressive cleaning."""
-    match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
-    if match:
         try:
-            json_string = match.group(1).strip()
-            json.loads(json_string)
-            logging.debug("Aggressive JSON extraction from ```json block successful.")
-            return json_string
-        except json.JSONDecodeError as e:
-            logging.debug(f"Aggressive JSON decode error: {e}. Falling back to super-aggressive cleaning. Raw response: {response[:excerpt]}")
-            return _super_aggressive_json_cleaning(response, excerpt)  # Call super-aggressive
-        except Exception as e:
-            logging.error(f"Unexpected error during aggressive ```json extraction: {e}")
-            return response
-    else: # If no match for ```json block
-        return _super_aggressive_json_cleaning(response, excerpt)  # Call super-aggressive
+            if self.connection:
+                cursor = self.connection.cursor()
+                cursor.execute("SELECT COUNT(*) FROM REQUEST_LOG WHERE timestamp >= ? AND timestamp <= ?", (start_iso, end_iso))
+                llm_calls = cursor.fetchone()[0]
 
-def _super_aggressive_json_cleaning(response: str, excerpt: int) -> str:
-    """Attempts super-aggressive curly braces cleaning."""
-    try:
-        start = response.find('{')
-        end = response.rfind('}')
-        if start != -1 and end != -1:
-            super_aggressive_cleaned_response = response[start:end + 1]
-            try:
-                json.loads(super_aggressive_cleaned_response)
-                logging.debug("Super-aggressive JSON cleaning helped.")
-                logging.debug(f"Super-aggressively cleaned response: {super_aggressive_cleaned_response[:excerpt]}...")
-                return super_aggressive_cleaned_response
-            except json.JSONDecodeError as e:
-                logging.error(f"Super-aggressive JSON cleaning failed: {e}. Raw response: {response[:excerpt]}")
-                return response
-        else:
-            logging.error("Could not find JSON braces in the response.")
-            return response
-    except Exception as e:
-        logging.error(f"Unexpected error during super-aggressive cleaning: {e}")
-        return response
+                cursor.execute(f"""SELECT COUNT(*) 
+                            FROM {self.config.results_table}
+                            WHERE request_id IN (SELECT id from REQUEST_LOG where timestamp >= ? AND timestamp <= ?)""",
+                            (start_iso, end_iso))
+                successes = cursor.fetchone()[0]
 
-
-def clean_json_response(response: str, excerpt: int) -> str:
-    """Cleans the LLM response to extract JSON, using aggressive and super-aggressive cleaning as fallbacks."""
-
-    if not response:
-        return response
-
-    # 1. Original Extraction
-    cleaned_response = re.sub(r'^```json\s*', '', response.strip(), flags=re.MULTILINE)
-    cleaned_response = re.sub(r'^```\s*', '', cleaned_response, flags=re.MULTILINE)
-    cleaned_response = re.sub(r'\s*```$', '', cleaned_response, flags=re.MULTILINE)
-    cleaned_response = cleaned_response.strip()
-
-    try:
-        json.loads(cleaned_response)
-        return cleaned_response
-    except json.JSONDecodeError as e:
-        logging.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. Raw response: {response[:excerpt]}")
-        return _aggressive_json_cleaning(response, excerpt)  # Call aggressive cleaning
-
-
-    except Exception as e:
-        logging.error(f"Unexpected error during initial cleaning: {e}")
-        return response
-
-def calculate_chunks(filename: str, chunk_size: int) -> List[Tuple[int, int]]:
-    try:
-        with open(filename, 'r', encoding='utf-8') as file:
-            content = file.read()
-    except UnicodeDecodeError:
-        logging.exception(f"File {filename} is not valid UTF-8")
-        raise
-    
-    if not content:
-        return []
-    
-    if len(content) <= chunk_size:
-        return [(0, len(content))]  # Single chunk if it fits
-    
-    chunks = []
-    start = 0
-    
-    while start < len(content):
-        window = content[start:start + chunk_size]
-        match = list(re.finditer(r'[\.\!\?]\s', window))
-        
-        if not match: 
-            end = min(start + chunk_size, len(content))
-        else:
-            end = start + match[-1].end()
-        
-        chunks.append((start, end))
-        start = end
-    
-    return chunks
-
-def get_chunk_content(filename: str, chunk_bounds: Tuple[int, int]) -> str:
-    with open(filename, 'r', encoding='utf-8') as file:
-        content = file.read()
-        return content[chunk_bounds[0]:chunk_bounds[1]]
-
-def process_chunk(db: Database, filename: str, chunk_number: int, config: ExtractorConfig) -> bool:
-    """Invokes LLM call function and stores results"""
-    chunk_bounds = db.get_chunk_bounds(filename, chunk_number)
-    if not chunk_bounds:
-        return False
-
-    content = get_chunk_content(filename, chunk_bounds)
-
-    try:
-        response, full_response = get_llm_response(
-            content,
-            db.analyzer.config.prompt,
-            config
-        )
-
-        if response is None:
-            result = ProcessingResult(
-                success=False,
-                raw_response=full_response,
-                error_message="Empty response from model"
-            )
-        else:
-            cleaned_response = clean_json_response(response, config.excerpt)
-            json_response = json.loads(cleaned_response)
-
-            missing_nodes = [
-                node for node in db.analyzer.config.expected_json_nodes
-                if node not in json_response
-            ]
-
-            if missing_nodes:
-                result = ProcessingResult(
-                    success=False,
-                    raw_response=full_response,
-                    error_message=f"Missing expected nodes: {missing_nodes}"
-                )
+                summary += f"\nSuccessful data extractions: {successes} out of {llm_calls} LLM calls"
             else:
-                result = ProcessingResult(
-                    success=True,
-                    raw_response=full_response,
-                    extracted_data=json_response
-                )
+                    summary += "\nDatabase not initialized or connection closed."
+        except sqlite3.OperationalError as e:
+            summary += f"\nError retrieving stats from database: {e}"
+        except AttributeError as e:
+            summary += f"\nAttributeError: {e}. Possible db initialization issues."
 
-        request_id = db.log_request(filename, chunk_number, config.inconfig_values.model, result)
+        start_datetime = datetime.fromisoformat(start_iso.replace('Z', '+00:00'))
+        end_datetime = datetime.fromisoformat(end_iso.replace('Z', '+00:00'))
+        duration = end_datetime - start_datetime
+        summary += f"\nRun duration: {duration}"
 
-        if result.success and result.extracted_data:
-            try:
-                db.store_results(
-                    request_id, filename, chunk_number, result.extracted_data
-                )
-            except sqlite3.OperationalError as e:
-                logging.error(f"Error storing results: {e}. Check the {config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
-                sys.exit(1) # instead of raise, as it's a standalone script and nothing will process the escalated error
+        return summary
 
-        return result.success
 
-    except Exception as e:
-        result = ProcessingResult(
-            success=False,
-            raw_response=full_response,
-            error_message=f"Error processing chunk: {str(e)}"
-        )
-        db.log_request(filename, chunk_number, config.inconfig_values.model, result)
-        return False
-    
 def get_current_timestamp_iso():
     """Returns current UTC timestamp in ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 signal_received = False  # Add this global flag to avoid failures message duplication on terminal kill
 
-def get_run_summary(db_instance, start_iso, end_iso, max_failures):
-    """Retrieves and formats the run summary details."""
+class DocumentAnalyzer:
+    def __init__(self, config: ExtractorConfig, db: Database):
+        self.config = config
+        self.db = db
 
-    all_skipped = db_instance.get_all_skipped_chunks_for_run(start_iso, end_iso, max_failures)
-    summary = ""
-    if all_skipped:
-        summary += "\nFinal summary of skipped chunks:\n"
-        for file, chunk, failures in all_skipped:
-            summary += f"- {file} chunk {chunk} ({failures} failures)\n"
+    def get_llm_response(self, content: str, prompt: str) -> Tuple[Optional[str], str]:
+        global signal_received
+        if signal_received:
+            return None, "Request skipped due to interrupt."
+        
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.config.key}",
+                "Content-Type": "application/json"
+            }
 
-    try:
-        if db_instance and db_instance.connection:
-            cursor = db_instance.connection.cursor()
-            cursor.execute("SELECT COUNT(*) FROM REQUEST_LOG WHERE timestamp >= ? AND timestamp <= ?", (start_iso, end_iso))
-            llm_calls = cursor.fetchone()[0]
+            data = {
+                "model": self.config.inconfig_values.model,
+                "messages": [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": content}
+                ],
+                "temperature": self.config.inconfig_values.temperature
+            }
 
-            cursor.execute(f"""SELECT COUNT(*) 
-                           FROM {db_instance.analyzer.config.results_table}
-                           WHERE request_id IN (SELECT id from REQUEST_LOG where timestamp >= ? AND timestamp <= ?)""",
-                           (start_iso, end_iso))
-            successes = cursor.fetchone()[0]
+            response = requests.post(
+                f"{self.config.inconfig_values.provider}/chat/completions",
+                headers=headers,
+                json=data,
+                timeout=self.config.inconfig_values.timeout
+            )
 
-            summary += f"\nSuccessful data extractions: {successes} out of {llm_calls} LLM calls"
+            response.raise_for_status()
 
+            if signal_received:
+                return None, "Request interrupted after response, during processing"
+
+            logging.debug(f"Status code: {response.status_code}")
+            logging.debug(f"Raw response: {response.text.strip()[:self.config.excerpt]}")
+
+            if not response.text.strip():
+                return None, ""
+
+            response_data = response.json()
+
+            if 'choices' not in response_data or not response_data['choices']:
+                return None, json.dumps(response_data)
+
+            choice = response_data['choices'][0]
+            if 'message' not in choice or 'content' not in choice['message']:
+                return None, json.dumps(response_data)
+
+            return choice['message']['content'], json.dumps(response_data)
+
+        except requests.exceptions.RequestException as e:
+            logging.exception(f"Error making request to {self.config.inconfig_values.provider}: {e}")
+            return None, f"Request error: {e}"
+        except json.JSONDecodeError as e:
+            logging.exception(f"Error decoding JSON response: {e}")
+            return None, f"JSON decode error: {e}"
+        except KeyError as e:
+            logging.exception(f"KeyError in JSON response: {e}")
+            return None, f"Key error: {e}"
+        except requests.exceptions.HTTPError as e:
+            logging.exception(f"HTTP Error: {e}")
+            return None, f"HTTP Error: {e}"
+        except Exception as e:
+            logging.exception(f"Unexpected error: {e}")
+            return None, f"Unexpected error: {e}"
+        
+
+    def _aggressive_json_cleaning(self, response: str) -> str:
+        """Attempts aggressive ```json extraction."""
+        match = re.search(r"```json\s*([\s\S]*?)\s*```", response)
+        if match:
+            try:
+                json_string = match.group(1).strip()
+                json.loads(json_string)  # Just check if it's valid JSON
+                logging.debug("Aggressive JSON extraction from ```json block successful.")
+                return json_string
+            except json.JSONDecodeError as e:
+                logging.debug(f"Aggressive JSON decode error: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+                return response  # Return original response if aggressive cleaning fails
+            except Exception as e:
+                logging.error(f"Unexpected error during aggressive ```json extraction: {e}")
+                return response  # Return original response on any other exception
         else:
-            summary += "\nDatabase not initialized or connection closed."
-    except sqlite3.OperationalError as e:
-        summary += f"\nError retrieving stats from database: {e}"
-    except AttributeError as e:
-        summary += f"\nAttributeError: {e}. Possible db initialization issues."
+            return response  # Return original response if no ```json block is found
 
-    start_datetime = datetime.fromisoformat(start_iso.replace('Z', '+00:00'))
-    end_datetime = datetime.fromisoformat(end_iso.replace('Z', '+00:00'))
-    duration = end_datetime - start_datetime
-    summary += f"\nRun duration: {duration}"
+    def _super_aggressive_json_cleaning(self, response: str) -> str:
+        """Attempts super-aggressive curly braces cleaning."""
+        try:
+            start = response.find('{')
+            end = response.rfind('}')
+            if start != -1 and end != -1:
+                super_aggressive_cleaned_response = response[start:end + 1]
+                try:
+                    json.loads(super_aggressive_cleaned_response)
+                    logging.debug("Super-aggressive JSON cleaning helped.")
+                    logging.debug(f"First {self.config.excerpt} characters of super-aggressively cleaned response: {super_aggressive_cleaned_response[:self.config.excerpt]}")
+                    return super_aggressive_cleaned_response
+                except json.JSONDecodeError as e:
+                    logging.error(f"Super-aggressive JSON cleaning failed: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+                    return response
+            else:
+                logging.warning("Could not find JSON braces in the response.")
+                return response
+        except Exception as e:
+            logging.error(f"Unexpected error during super-aggressive cleaning: {e}")
+            return response
 
-    return summary
 
-def signal_handler(sig, frame, db_instance, start_iso, max_failures):
+    def clean_json_response(self, response: str) -> Optional[dict]: # -> str:
+        """Cleans the LLM response to extract JSON, using aggressive and super-aggressive cleaning as fallbacks."""
+
+        if not response:
+            return response
+
+        try:
+            cleaned_response = re.sub(r'^```json\s*', '', response.strip(), flags=re.MULTILINE)
+            cleaned_response = re.sub(r'^```\s*', '', cleaned_response, flags=re.MULTILINE)
+            cleaned_response = re.sub(r'\s*```$', '', cleaned_response, flags=re.MULTILINE)
+            cleaned_response = cleaned_response.strip()
+            return json.loads(cleaned_response)
+            # return cleaned_response
+        except (json.JSONDecodeError, TypeError) as e:
+            logging.debug(f"Initial JSON decode error: {e}. Response: {response[:self.config.excerpt]}")
+
+            # Attempt aggressive cleaning
+            aggressive_cleaned = self._aggressive_json_cleaning(response)  # Call aggressive cleaning
+            try:
+                json_response = json.loads(aggressive_cleaned)
+                logging.debug("Aggressive cleaning succeeded.")
+                return json_response
+            except json.JSONDecodeError as e:
+                logging.debug(f"Aggressive cleaning failed: {e}. Aggressively cleaned response: {aggressive_cleaned[:self.config.excerpt]}")
+
+                # Attempt super-aggressive cleaning
+                super_aggressive_cleaned = self._super_aggressive_json_cleaning(response) # Call super-aggressive cleaning
+                try:
+                    json_response = json.loads(super_aggressive_cleaned)
+                    logging.debug("Super-aggressive cleaning succeeded.")
+                    return json_response
+                except json.JSONDecodeError as e:
+                    logging.warning(f"All cleaning attempts failed, even super-aggressive: {e}. Super-aggressively cleaned response: {super_aggressive_cleaned[:self.config.excerpt]}")
+                    return None  # Return None only after all attempts fail
+
+        except Exception as e:
+            logging.error(f"Unexpected error during JSON cleaning: {e}. Response: {response[:self.config.excerpt]}")
+            return None  # Return None on any other exception
+
+        '''except json.JSONDecodeError as e:
+            logging.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+            return self._aggressive_json_cleaning(response)  # Call aggressive cleaning
+
+
+        except Exception as e:
+            logging.error(f"Unexpected error during initial cleaning: {e}")
+            return response
+        '''
+    def calculate_chunks(self, filename: str) -> List[Tuple[int, int]]:
+        try:
+            with open(filename, 'r', encoding='utf-8') as file:
+                content = file.read()
+        except UnicodeDecodeError:
+            logging.exception(f"File {filename} is not valid UTF-8")
+            raise
+        
+        if not content:
+            return []
+        
+        if len(content) <= self.config.inconfig_values.chunk_size:
+            return [(0, len(content))]  # Single chunk if it fits
+        
+        chunks = []
+        start = 0
+        
+        while start < len(content):
+            window = content[start:start + self.config.inconfig_values.chunk_size]
+            match = list(re.finditer(r'[\.\!\?]\s', window))
+            
+            if not match: 
+                end = min(start + self.config.inconfig_values.chunk_size, len(content))
+            else:
+                end = start + match[-1].end()
+            
+            chunks.append((start, end))
+            start = end
+        
+        return chunks
+
+    def get_chunk_content(self, filename: str, chunk_bounds: Tuple[int, int]) -> str:
+        with open(filename, 'r', encoding='utf-8') as file:
+            content = file.read()
+            return content[chunk_bounds[0]:chunk_bounds[1]]
+
+    def process_chunk(self, db: Database, filename: str, chunk_number: int) -> bool:
+        """Invokes LLM call function and stores results"""
+        chunk_bounds = db.get_chunk_bounds(filename, chunk_number)
+        if not chunk_bounds:
+            return False
+
+        content = self.get_chunk_content(filename, chunk_bounds)
+
+        try:
+            response, full_response = self.get_llm_response(
+                content,
+                self.config.prompt
+            )
+
+            if response is None:
+                result = ProcessingResult(
+                    success=False,
+                    raw_response=full_response,
+                    error_message="Empty response from model"
+                )
+            else:
+                # cleaned_response = self.clean_json_response(response)
+                json_response = self.clean_json_response(response)
+
+                if json_response is None: # Check if json_response is None
+                    result = ProcessingResult(
+                        success=False,
+                        raw_response=full_response,
+                        error_message="Failed to extract valid JSON"  # Clearer error message
+                    )
+                else:
+                    missing_nodes = [
+                        node for node in self.db.config.expected_json_nodes
+                        if node not in json_response
+                    ]
+
+                    if missing_nodes:
+                        result = ProcessingResult(
+                            success=False,
+                            raw_response=full_response,
+                            error_message=f"Missing expected nodes: {missing_nodes}"
+                        )
+                    else:
+                        result = ProcessingResult(
+                            success=True,
+                            raw_response=full_response,
+                            extracted_data=json_response
+                        )
+
+            request_id = db.log_request(filename, chunk_number, result)
+
+            if result.success and result.extracted_data:
+                try:
+                    db.store_results(
+                        request_id, filename, chunk_number, result.extracted_data
+                    )
+                except sqlite3.OperationalError as e:
+                    logging.error(f"Error storing results: {e}. Check the {db.config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
+                    sys.exit(1) # instead of raise, as it's a standalone script and nothing will process the escalated error
+
+            return result.success
+        except Exception as e:
+            result = ProcessingResult(
+                success=False,
+                raw_response=full_response,
+                error_message=f"Error processing chunk: {str(e)}"
+            )
+
+            db.log_request(filename, chunk_number, result)
+
+            if logging.getLogger().getEffectiveLevel() <= logging.DEBUG:  # Check if log level is DEBUG or lower
+                logging.exception("Error processing chunk (DEBUG mode):") # Log with traceback
+            else:
+                return False # Continue execution (as before)
+
+        
+def signal_handler(sig, frame, db_instance, start_iso):
     """Handles Ctrl+C interrupt and prints a graceful message with stats."""
     global signal_received
     signal_received = True
@@ -918,7 +1045,7 @@ def signal_handler(sig, frame, db_instance, start_iso, max_failures):
 
     try:
         if db_instance and db_instance.connection:
-            logging.info(get_run_summary(db_instance, start_iso, end_iso, max_failures))
+            logging.info(db_instance.get_run_summary(start_iso, end_iso))
         else:
             logging.error("Database not initialized or connection closed.")
     except Exception as e:
@@ -949,9 +1076,11 @@ def main():
     if args.model is not None: config.inconfig_values.model = args.model
     if args.provider is not None: config.inconfig_values.provider = args.provider
     # Set fields that don't come from config, their defaults in config class declaration
-    if args.results_db is not None: config.results_db = args.results_db
+    if args.results_db is not None: config.results_db = args.results_db 
+    else: config.results_db=f"{config.name}.db"
     config.skip_key_check = args.skip_key_check
     if args.run_tag is not None: config.run_tag = args.run_tag
+    else: config.run_tag = args.config
     if args.llm_debug_excerpt_length is not None: config.excerpt = args.llm_debug_excerpt_length
 
     load_dotenv()
@@ -962,13 +1091,13 @@ def main():
         ConfigLoader.validate_config_values(config)
     except ValueError as e:
         logging.error(f"Configuration error: {e}")
-        return  # Or exit the program
+        sys.exit(1)
 
     logging.info("Welcome! Check README at Github for useful prompt engineering tips")
     logging.info(f"Version {VERSION} started run at UTC {start_iso}")
     if config.run_tag:  # Use config object
         logging.info(f"Run Tag: {config.run_tag}")
-    logging.info("\nUsing configuration:")
+    logging.info("\n=== Using configuration:")
     logging.info(f"Database: {config.results_db}")
     logging.info(f"Context window: {config.inconfig_values.chunk_size}")
     logging.info(f"Temperature: {config.inconfig_values.temperature}")
@@ -977,13 +1106,11 @@ def main():
     logging.info(f"Data folder: {config.inconfig_values.data_folder}")
     logging.info(f"Max failures: {config.inconfig_values.max_failures}")
     logging.info(f"Model: {config.inconfig_values.model}\n\nPress Ctrl-C to stop the run (you can continue later)\n")
-        
 
-    analyzer = DocumentAnalyzer(config)
-
-    with Database(analyzer) as db:
+    with Database(config) as db:
+        analyzer = DocumentAnalyzer(config, db)
         db.create_indexes() # Create indexes after connecting to the database.
-        signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso, config.inconfig_values.max_failures)) # needs time and max failures to generate summary on exit
+        signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
         
         try:
             while True:
@@ -995,15 +1122,12 @@ def main():
                     full_path = os.path.join(config.inconfig_values.data_folder, file)
 
                     if not db.chunk_exists(full_path):
-                        chunks = calculate_chunks(full_path, config.inconfig_values.chunk_size)
+                        chunks = analyzer.calculate_chunks(full_path)
                         db.insert_chunks(full_path, chunks)
 
                     chunks = db.get_unprocessed_chunks(
-                        full_path, 
-                        config.results_table,
-                        start_iso, 
-                        config.inconfig_values.max_failures, 
-                        config.run_tag
+                        full_path,
+                        start_iso
                     )
                     unprocessed.extend(chunks)
 
@@ -1014,11 +1138,10 @@ def main():
                 file, chunk_number = random.choice(unprocessed)
                 logging.info(f"Processing {file} chunk {chunk_number}")
 
-                process_chunk(
+                analyzer.process_chunk(
                     db=db,
                     filename=file,
-                    chunk_number=chunk_number,
-                    config = config
+                    chunk_number=chunk_number
                 )
 
                 if signal_received:
@@ -1028,7 +1151,7 @@ def main():
         finally:
             end_iso = get_current_timestamp_iso()
             if not signal_received:
-                logging.info(get_run_summary(db, start_iso, end_iso, config.inconfig_values.max_failures))
+                logging.info(db.get_run_summary(start_iso, end_iso))
 
 if __name__ == "__main__":
     main()
