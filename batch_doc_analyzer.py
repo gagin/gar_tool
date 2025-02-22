@@ -14,190 +14,44 @@ from dotenv import load_dotenv
 import requests
 import requests.exceptions
 #import time
-import logging, traceback
+import traceback
+import logging_wrapper
 
-VERSION = '0.1.14' # requires major.minor.patch notation for auto-increment on commits via make command
-MAX_FAILURES_LIMIT = 5
+VERSION = '0.1.15' # requires major.minor.patch notation for auto-increment on commits via make command
+MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK = 5 # limit on maximum accepted value provided by the user
+MAX_PASSABLE_EXECUTION_ERRORS = 3 # for things like http errors, so loop with a wrong API key would terminate
+MAX_PASSABLE_WARNINGS=10 # stop if too many warnings, the model clearly can't handle it
+### Utility code first
 
-@dataclass
-class ExtractorDefaults:
-    chunk_size: int = 50000
-    temperature: float = 0.0
-    timeout: int = 30
-    data_folder: str = "./src"
-    max_failures: int = 2
-    model: str = "google/gemini-2.0-flash-001:floor"
-    provider: str = "https://openrouter.ai/api/v1"
+logger = logging_wrapper.logger
 
-@dataclass
-class ExtractorConfig:
-    name: str
-    inconfig_values: ExtractorDefaults
-    prompt: str
-    expected_json_nodes: List[str]
-    db_mapping: Dict[str, str]
-    results_table: str = "DATA"
-    results_db: Optional[str] = "results.db"
-    key: Optional[str] = None
-    skip_key_check: bool = False
-    run_tag: Optional[str] = None
-    excerpt: int = 100
+def get_current_timestamp_iso():
+    """Returns current UTC timestamp in ISO 8601 format."""
+    return datetime.now(timezone.utc).isoformat()
 
+def collapse_whitespace(text: str): # Used for convenience in the code, to write longer messages as multiline
+    return re.sub(r'\s+', ' ', text.replace('\n', ' ')).strip()
 
-class ConfigLoader:
-    @staticmethod
-    def validate_file_config(config_data: Dict[str, Any]) -> None:
-        """Validate configuration parameters"""
-        if not isinstance(config_data, dict):
-            raise ValueError("Configuration must be a dictionary")
-            
-        # Validate required sections
-        required_sections = ['name', 'defaults', 'nodes', 'prompt_template']
-        for section in required_sections:
-            if section not in config_data:
-                raise ValueError(f"Missing required section: {section}")
-        
-        # Validate inconfig_values
-        defaults = config_data['defaults']
-        if not isinstance(defaults, dict):
-            raise ValueError("'defaults' must be a dictionary")
-            
-        # Values check is done after CLI overrides
-            
-        # Validate nodes
-        nodes = config_data['nodes']
-        if not isinstance(nodes, dict):
-            raise ValueError("'nodes' must be a dictionary")
-        for node_name, node_config in nodes.items():
-            if not isinstance(node_config, dict):
-                raise ValueError(f"Node '{node_name}' configuration must be a dictionary")
-            if 'description' not in node_config:
-                raise ValueError(f"Node '{node_name}' missing required 'description' field")
-            
-    def validate_config_values(config: ExtractorConfig) -> None:
-        """Validates input parameters, raising an exception on the first error.
-        Includes superficial API key validation.
-        Raises:
-            TypeError: If a parameter is of the wrong type.
-            ValueError: If a parameter's value is invalid.
-            FileNotFoundError: If the data folder does not exist.
-            NotADirectoryError: If the provided path is not a directory.
-            PermissionError: If the data folder is not readable.
-            ValueError: If API key is missing and not skipped.
-        """
+signal_received = False  # global flag to avoid failures message duplication on terminal kill
+def signal_handler(sig, frame, db_instance, start_iso):
+    """Handles Ctrl+C interrupt and prints a graceful message with stats."""
+    global signal_received
+    signal_received = True
+    logger.info('\nCtrl+C detected. Gracefully exiting...')
+    end_iso = get_current_timestamp_iso()
 
-        settings = config.inconfig_values
+    try:
+        if db_instance and db_instance.connection:
+            logger.info(db_instance.get_run_summary(start_iso, end_iso))
+        else:
+            logger.error("Database not initialized or connection closed.")
+    except Exception as e:
+        logger.exception(f"Error in signal handler: {e}")
 
-        if not isinstance(settings.temperature, (int, float)):
-            raise TypeError(f"Temperature must be a number, got {type(settings.temperature)}")
-        if not (0 <= settings.temperature <= 1):
-            raise ValueError(f"Temperature must be between 0 and 1, got {settings.temperature}")
+    if db_instance and db_instance.connection:
+        db_instance.close()
 
-        if not isinstance(settings.chunk_size, int):
-            raise TypeError(f"Context window must be an integer, got {type(settings.chunk_size)}")
-        if settings.chunk_size <= 0:
-            raise ValueError(f"Context window must be positive, got {settings.chunk_size}")
-
-        if not isinstance(settings.timeout, int):
-            raise TypeError(f"Timeout must be an integer, got {type(settings.timeout)}")
-        if settings.timeout <= 0:
-            raise ValueError(f"Timeout must be positive, got {settings.timeout}")
-
-        if not isinstance(settings.max_failures, int):
-            raise TypeError(f"Max failures must be an integer, got {type(settings.max_failures)}")
-        if settings.max_failures < 1:
-            raise ValueError(f"Max failures must be at least 1, got {settings.max_failures}")
-        if settings.max_failures > MAX_FAILURES_LIMIT:
-            raise ValueError(f"Max failures cannot exceed {MAX_FAILURES_LIMIT}, got {settings.max_failures}")
-
-        if not isinstance(config.excerpt, int):
-            raise TypeError(f"LLM debug excerpt length must be an integer, got {type(config.excerpt)}")
-        if config.excerpt <= 0:
-            raise ValueError(f"LLM debug excerpt length must be positive, got {config.excerpt}")
-
-        data_folder = settings.data_folder #assign to a variable to avoid long lines
-        if not isinstance(data_folder, str):
-            raise TypeError(f"Data folder must be a string, got {type(data_folder)}")
-        if not data_folder:  # Check for empty string
-            raise ValueError("Data folder must be specified")
-        if not os.path.exists(data_folder):
-            raise FileNotFoundError(f"Data folder '{data_folder}' does not exist")
-        if not os.path.isdir(data_folder):
-            raise NotADirectoryError(f"'{data_folder}' is not a directory")
-        if not os.access(data_folder, os.R_OK):
-            raise PermissionError(f"Data folder '{data_folder}' is not readable")
-
-        if not isinstance(settings.model, str):
-            raise TypeError(f"Model must be a string, got {type(settings.model)}")
-        if not settings.model:  # Check for empty string
-            raise ValueError("Model cannot be empty")
-
-        if not isinstance(settings.provider, str):
-            raise TypeError(f"Provider must be a string, got {type(settings.provider)}")
-        if not settings.provider:  # Check for empty string
-            raise ValueError("Provider cannot be empty")
-
-        if not config.key and not config.skip_key_check:
-            error_message = collapse_whitespace("""
-                API key is missing. Either set the OPENROUTER_API_KEY environment variable,
-                or use --skip_key_check if the model does not require an API key.
-                """)
-            logging.error(error_message)
-            sys.exit(1) 
-        
-    @staticmethod
-    def load_config_file(config_path: str) -> ExtractorConfig:
-        """Load and validate configuration from YAML file"""
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = yaml.safe_load(f)
-            
-            ConfigLoader.validate_file_config(config_data)  # Validate YAML structure
-            
-            # Load settings
-            defaults = ExtractorDefaults(
-                chunk_size=config_data['defaults']['chunk_size'],
-                temperature=config_data['defaults']['temperature'],
-                timeout=config_data['defaults']['timeout'],
-                data_folder=config_data['defaults']['data_folder'],
-                max_failures=config_data['defaults']['max_failures'],
-                model=config_data['defaults']['model'],
-                provider=config_data['defaults']['provider']
-            )
-
-            # Generate node descriptions for prompt
-            node_descriptions = []
-            db_mapping = {}
-            for name, node in config_data['nodes'].items():
-                description = f"- {name}: {node['description']}"
-                if node.get('format'):
-                    description += f" ({node['format']})"
-                node_descriptions.append(description)
-                
-                if 'db_column' in node:
-                    db_mapping[name] = node['db_column']
-
-            # Format prompt with node descriptions
-            prompt = config_data['prompt_template'].format(
-                node_descriptions='\n'.join(node_descriptions)
-            )
-
-            return ExtractorConfig(
-                name=config_data['name'],
-                inconfig_values=defaults,
-                prompt=prompt,
-                expected_json_nodes=list(config_data['nodes'].keys()),
-                db_mapping=db_mapping
-            )
-            
-        except FileNotFoundError:
-            logging.error(f"Configuration file not found: {config_path}")
-            sys.exit(1)
-            # raise ValueError(f"Configuration file not found: {config_path}")
-        except yaml.YAMLError as e:
-            logging.error(f"Invalid YAML in configuration file: {e}")
-            sys.exit(1)
-            # raise ValueError(f"Invalid YAML in configuration file: {e}")
+    sys.exit(0)
 
 def check_duplicate_args(argv): # Checks for duplicate named arguments and exits with an error if found.
     seen_args = set()
@@ -205,12 +59,9 @@ def check_duplicate_args(argv): # Checks for duplicate named arguments and exits
     for arg in argv[1:]:  # Start from index 1 to skip the script name
         if arg.startswith('--'):  # Named argument
             if arg in seen_args:
-                logging.error(f"Error: Duplicate argument '{arg}' found.")
+                logger.error(f"Error: Duplicate argument '{arg}' found.")
                 sys.exit(1)
                 seen_args.add(arg)
-
-def collapse_whitespace(text: str):
-    return re.sub(r'\s+', ' ', text.replace('\n', ' ')).strip()
 
 def parse_arguments() -> Namespace:
     parser = argparse.ArgumentParser(description=collapse_whitespace("""
@@ -305,19 +156,208 @@ def parse_arguments() -> Namespace:
 
     return parser.parse_args()
 
-def setup_logger(log_level: str):  # Takes log level as string
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level) 
+### Functional code
 
-    class InfoFormatter(logging.Formatter):
-        def format(self, record):
-            if record.levelname == 'INFO':
-                return record.getMessage()
-            return super().format(record)
+@dataclass
+class ExtractorDefaults:
+    chunk_size: int = 50000
+    temperature: float = 0.0
+    timeout: int = 30
+    data_folder: str = "./src"
+    max_failures: int = 2
+    model: str = "google/gemini-2.0-flash-001:floor"
+    provider: str = "https://openrouter.ai/api/v1"
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(InfoFormatter('%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')) # removed name, there's only root here
-    root_logger.addHandler(handler)
+@dataclass
+class ExtractorConfig:
+    name: str
+    inconfig_values: ExtractorDefaults
+    prompt: str
+    expected_json_nodes: List[str]
+    db_mapping: Dict[str, str]
+    results_table: str = "DATA"
+    results_db: Optional[str] = "results.db"
+    key: Optional[str] = None
+    skip_key_check: bool = False
+    run_tag: Optional[str] = None
+    excerpt: int = 100
+
+
+class ConfigLoader:
+    @staticmethod
+    def validate_file_config(config_data: Dict[str, Any]) -> None:
+        """Validate configuration parameters"""
+        if not isinstance(config_data, dict):
+            raise ValueError("Configuration must be a dictionary")
+            
+        # Validate required sections
+        required_sections = ['name', 'defaults', 'nodes', 'prompt_template']
+        for section in required_sections:
+            if section not in config_data:
+                raise ValueError(f"Missing required section: {section}")
+        
+        # Validate inconfig_values
+        defaults = config_data['defaults']
+        if not isinstance(defaults, dict):
+            raise ValueError("'defaults' must be a dictionary")
+            
+        # Values check is done after CLI overrides
+            
+        # Validate nodes
+        nodes = config_data['nodes']
+        if not isinstance(nodes, dict):
+            raise ValueError("'nodes' must be a dictionary")
+        for node_name, node_config in nodes.items():
+            if not isinstance(node_config, dict):
+                raise ValueError(f"Node '{node_name}' configuration must be a dictionary")
+            if 'description' not in node_config:
+                raise ValueError(f"Node '{node_name}' missing required 'description' field")
+            
+    def validate_config_values(config: ExtractorConfig) -> None:
+        """Validates input parameters, raising an exception on the first error.
+        Includes superficial API key validation.
+        Raises:
+            TypeError: If a parameter is of the wrong type.
+            ValueError: If a parameter's value is invalid.
+            FileNotFoundError: If the data folder does not exist.
+            NotADirectoryError: If the provided path is not a directory.
+            PermissionError: If the data folder is not readable.
+            ValueError: If API key is missing and not skipped.
+        """
+
+        settings = config.inconfig_values
+        if not isinstance(settings.temperature, (int, float)): 
+             logger.error(f"Temperature must be a number, got {type(settings.temperature)}") 
+             sys.exit(1)
+        if not (0 <= settings.temperature <= 1): 
+            logger.error(f"Temperature must be between 0 and 1, got {settings.temperature}") 
+            sys.exit(1)
+
+        if not isinstance(settings.chunk_size, int): 
+            logger.error(f"Context window must be an integer, got {type(settings.chunk_size)}") 
+            sys.exit(1)
+        if settings.chunk_size <= 0: 
+            logger.error(f"Context window must be positive, got {settings.chunk_size}") 
+            sys.exit(1)
+
+        if not isinstance(settings.timeout, int): 
+            logger.error(f"Timeout must be an integer, got {type(settings.timeout)}") 
+            sys.exit(1)
+        if settings.timeout <= 0: 
+            logger.error(f"Timeout must be positive, got {settings.timeout}") 
+            sys.exit(1)
+
+        if not isinstance(settings.max_failures, int): 
+            logger.error(f"Max failures must be an integer, got {type(settings.max_failures)}") 
+            sys.exit(1)
+        if settings.max_failures < 1: 
+            logger.error(f"Max failures must be at least 1, got {settings.max_failures}") 
+            sys.exit(1)
+        if settings.max_failures > MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK: 
+            logger.error(f"Max failures cannot exceed {MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK}, got {settings.max_failures}") 
+            sys.exit(1)
+
+        if not isinstance(config.excerpt, int): 
+            logger.error(f"LLM debug excerpt length must be an integer, got {type(config.excerpt)}") 
+            sys.exit(1)
+        if config.excerpt <= 0: 
+            logger.error(f"LLM debug excerpt length must be positive, got {config.excerpt}") 
+            sys.exit(1)
+
+        data_folder = settings.data_folder #assign to a variable to avoid long lines 
+        if not isinstance(data_folder, str): 
+            logger.error(f"Data folder must be a string, got {type(data_folder)}") 
+            sys.exit(1)
+        if not data_folder:  # Check for empty string 
+            logger.error("Data folder must be specified") 
+            sys.exit(1)
+        if not os.path.exists(data_folder): 
+            logger.error(f"Data folder '{data_folder}' does not exist") 
+            sys.exit(1)
+        if not os.path.isdir(data_folder): 
+            logger.error(f"'{data_folder}' is not a directory") 
+            sys.exit(1)
+        if not os.access(data_folder, os.R_OK): 
+            logger.error(f"Data folder '{data_folder}' is not readable") 
+            sys.exit(1)
+
+        if not isinstance(settings.model, str): 
+            logger.error(f"Model must be a string, got {type(settings.model)}") 
+            sys.exit(1)
+        if not settings.model:  # Check for empty string 
+            logger.error("Model cannot be empty") 
+            sys.exit(1)
+
+        if not isinstance(settings.provider, str): 
+            logger.error(f"Provider must be a string, got {type(settings.provider)}") 
+            sys.exit(1)
+        if not settings.provider:  # Check for empty string 
+            logger.error("Provider cannot be empty") 
+            sys.exit(1)
+
+        if not config.key and not config.skip_key_check:
+            error_message = collapse_whitespace("""
+                API key is missing. Either set the OPENROUTER_API_KEY environment variable,
+                or use --skip_key_check if the model does not require an API key.
+                """)
+            logger.error(error_message)
+            sys.exit(1) 
+        
+    @staticmethod
+    def load_config_file(config_path: str) -> ExtractorConfig:
+        """Load and validate configuration from YAML file"""
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = yaml.safe_load(f)
+            
+            ConfigLoader.validate_file_config(config_data)  # Validate YAML structure
+            
+            # Load settings
+            defaults = ExtractorDefaults(
+                chunk_size=config_data['defaults']['chunk_size'],
+                temperature=config_data['defaults']['temperature'],
+                timeout=config_data['defaults']['timeout'],
+                data_folder=config_data['defaults']['data_folder'],
+                max_failures=config_data['defaults']['max_failures'],
+                model=config_data['defaults']['model'],
+                provider=config_data['defaults']['provider']
+            )
+
+            # Generate node descriptions for prompt
+            node_descriptions = []
+            db_mapping = {}
+            for name, node in config_data['nodes'].items():
+                description = f"- {name}: {node['description']}"
+                if node.get('format'):
+                    description += f" ({node['format']})"
+                node_descriptions.append(description)
+                
+                if 'db_column' in node:
+                    db_mapping[name] = node['db_column']
+
+            # Format prompt with node descriptions
+            prompt = config_data['prompt_template'].format(
+                node_descriptions='\n'.join(node_descriptions)
+            )
+
+            return ExtractorConfig(
+                name=config_data['name'],
+                inconfig_values=defaults,
+                prompt=prompt,
+                expected_json_nodes=list(config_data['nodes'].keys()),
+                db_mapping=db_mapping
+            )
+            
+        except FileNotFoundError:
+            logger.error(f"Configuration file not found: {config_path}")
+            sys.exit(1)
+            # raise ValueError(f"Configuration file not found: {config_path}")
+        except yaml.YAMLError as e:
+            logger.error(f"Invalid YAML in configuration file: {e}")
+            sys.exit(1)
+            # raise ValueError(f"Invalid YAML in configuration file: {e}")
+
+
 
 @dataclass
 class Column:
@@ -396,7 +436,7 @@ class Database:
             result = cursor.fetchone()
             if result[0] != 'ok':
                 self.connection.close()
-                logging.error(f"The file '{db_path}' is not a valid SQLite database (integrity check failed). Error: {result[0]}")
+                logger.error(f"The file '{db_path}' is not a valid SQLite database (integrity check failed). Error: {result[0]}")
                 sys.exit(1)
 
             return self.connection  # Return connection only if successful and integrity check passes
@@ -404,50 +444,50 @@ class Database:
         except sqlite3.OperationalError as e:  # Catch specific OperationalErrors
             self.connection = None # Ensure connection is None if it failed.
             if os.path.isdir(db_path):
-                logging.error(f"The path '{db_path}' is a directory, not a file.")
+                logger.error(f"The path '{db_path}' is a directory, not a file.")
                 sys.exit(1)
 
             try:
                 mode = os.stat(db_path).st_mode
                 if not (stat.S_IREAD & mode and stat.S_IWRITE & mode):
-                    logging.error(f"The file '{db_path}' does not have read and write permissions.")
+                    logger.error(f"The file '{db_path}' does not have read and write permissions.")
                     sys.exit(1)
             except FileNotFoundError:  # Handle the case where the file doesn't exist
-                logging.error(f"The file '{db_path}' was not found.")
+                logger.error(f"The file '{db_path}' was not found.")
                 sys.exit(1)
             except Exception as perm_e:
-                logging.error(f"An unexpected error occurred when checking file permissions: {perm_e}")
+                logger.error(f"An unexpected error occurred when checking file permissions: {perm_e}")
                 raise  # Re-raise for higher-level handling
 
             try:
                 parent_dir = os.path.dirname(db_path)
                 if not os.access(parent_dir, os.W_OK):
-                    logging.error(f"The directory '{parent_dir}' does not have write permissions.")
+                    logger.error(f"The directory '{parent_dir}' does not have write permissions.")
                     sys.exit(1)
             except Exception as dir_perm_e:
-                logging.error(f"An unexpected error occurred when checking directory permissions: {dir_perm_e}")
+                logger.error(f"An unexpected error occurred when checking directory permissions: {dir_perm_e}")
                 raise  # Re-raise
 
-            logging.error(f"An OperationalError occurred: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
+            logger.error(f"An OperationalError occurred: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
             sys.exit(1) # Exit after logging the error
 
         except sqlite3.DatabaseError as e:  # Catch other DatabaseErrors
-            logging.error(f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
+            logger.error(f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
             sys.exit(1)
 
         except Exception as e:  # Catch any other unexpected exceptions
-            logging.exception(f"An unexpected error occurred: {e}") # Use logging.exception to include traceback
+            logger.exception(f"An unexpected error occurred: {e}") # Use logger.exception to include traceback
             raise  # Re-raise the exception after logging
         
     def _debug_log_busy_timeout(self):  # Private helper method
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
+        if logger.get_log_level_name() == "DEBUG":
             try:
                 cursor = self.connection.cursor()
                 cursor.execute("PRAGMA busy_timeout;")
                 timeout = cursor.fetchone()[0]
-                logging.debug(f"SQLite busy_timeout: {timeout} ms")
+                logger.debug(f"SQLite busy_timeout: {timeout} ms")
             except sqlite3.Error as e:
-                logging.error(f"Error getting busy_timeout: {e}")
+                logger.error(f"Error getting busy_timeout: {e}")
                 
     def _execute(self, cursor: sqlite3.Cursor, operation: Callable, query: str, params: Any = None) -> Tuple[bool, Optional[int]]:
         """Generic wrapper for cursor.execute() and cursor.executemany().
@@ -465,16 +505,16 @@ class Database:
                     lastrowid = cursor.lastrowid
         except sqlite3.OperationalError as e:
             if hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_LOCKED:
-                logging.error(f"Database locked: {e}")
+                logger.error(f"Database locked: {e}")
                 sys.exit(1)
             elif hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_BUSY:
-                logging.error(f"The database file is busy, do you have unsaved changes in DB Browser? [Operation returned: {e}]")
+                logger.error(f"The database file is busy, do you have unsaved changes in DB Browser? [Operation returned: {e}]")
                 sys.exit(1)    
             else:
-                logging.error(f"Database OperationalError: {e}")
+                logger.error(f"Database OperationalError: {e}")
                 sys.exit(1)
         except Exception as e:
-            logging.exception(f"An unexpected error occurred during database operation: {e}")
+            logger.exception(f"An unexpected error occurred during database operation: {e}")
             sys.exit(1)
 
         return True, lastrowid  # Return True and lastrowid (or None)
@@ -545,13 +585,13 @@ class Database:
         cursor = self.connection.cursor()
         try:
             if not self._execute_query(cursor, 'CREATE INDEX IF NOT EXISTS idx_request_log_file_chunk ON REQUEST_LOG(file, chunknumber)'):
-                logging.error("Failed to create index idx_request_log_file_chunk")
+                logger.error("Failed to create index idx_request_log_file_chunk")
             if not self._execute_query(cursor, f'CREATE INDEX IF NOT EXISTS idx_results_file_chunk ON {self.config.results_table}(file, chunknumber, run_tag)'):
-                logging.error(f"Failed to create index idx_results_file_chunk")
+                logger.error(f"Failed to create index idx_results_file_chunk")
             self.connection.commit()
         except Exception as e:
-            logging.error(f"Error creating indexes: {e}")
-            logging.warning("Continuing without indexes. Performance may be degraded.")
+            logger.error(f"Error creating indexes: {e}")
+            logger.warning("Continuing without indexes. Performance may be degraded.")
 
 
     def chunk_exists(self, filename: str) -> bool:
@@ -568,7 +608,7 @@ class Database:
         params = [(file, i, chunk[0], chunk[1]) for i, chunk in enumerate(chunks)]
 
         if not self._execute_many(cursor, query, params):  # Use the new _execute_many
-            logging.error("Failed to insert chunks to the db")
+            logger.error("Failed to insert chunks to the db")
             sys.exit(1)
 
         self.connection.commit()
@@ -585,45 +625,35 @@ class Database:
         try:
             cursor = self.connection.cursor()
             results_table = self.config.results_table
+            run_tag = self.config.run_tag
+            max_failures = self.config.inconfig_values.max_failures
 
-            if self.config.run_tag is not None:
-                # If run_tag is provided, check for file+chunk+run_tag duplicates and failure counts
-                sql_query = f'''
-                    SELECT c.file, c.chunknumber
-                    FROM FCHUNKS c
-                    LEFT JOIN {results_table} r
-                        ON c.file = r.file AND c.chunknumber = r.chunknumber AND r.run_tag = ?
-                    WHERE r.file IS NULL AND c.file = ?
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM REQUEST_LOG rl
-                        WHERE rl.file = c.file AND rl.chunknumber = c.chunknumber AND rl.success = 0 AND rl.timestamp > ?
-                        GROUP BY rl.file, rl.chunknumber
-                        HAVING COUNT(*) >= ?
-                    )
-                '''
-                cursor.execute(sql_query, (self.config.run_tag, filename, start_iso, self.config.inconfig_values.max_failures))
-            else:
-                # If no run_tag, perform the original file+chunk duplicate check and failure counts
-                sql_query = f'''
-                    SELECT c.file, c.chunknumber
-                    FROM FCHUNKS c
-                    LEFT JOIN {results_table} r
-                        ON c.file = r.file AND c.chunknumber = r.chunknumber
-                    WHERE r.file IS NULL AND c.file = ?
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM REQUEST_LOG rl
-                        WHERE rl.file = c.file AND rl.chunknumber = c.chunknumber AND rl.success = 0 AND rl.timestamp > ?
-                        GROUP BY rl.file, rl.chunknumber
-                        HAVING COUNT(*) >= ?
-                    )
-                '''
-                cursor.execute(sql_query, (filename, start_iso, self.config.inconfig_values.max_failures))
+            sql_query = f'''
+                SELECT c.file, c.chunknumber
+                FROM FCHUNKS c
+                LEFT JOIN {results_table} r
+                    ON c.file = r.file AND c.chunknumber = r.chunknumber
+                    {f"AND r.run_tag = ?" if run_tag else ""}
+                WHERE r.file IS NULL AND c.file = ?
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM REQUEST_LOG rl
+                    WHERE rl.file = c.file AND rl.chunknumber = c.chunknumber AND rl.success = 0 AND rl.timestamp > ?
+                    GROUP BY rl.file, rl.chunknumber
+                    HAVING COUNT(*) >= ?
+                )
+            '''
 
+            params = []
+            if run_tag:
+                params.append(run_tag)
+            params.extend([filename, start_iso, max_failures])
+
+            cursor.execute(sql_query, tuple(params))
             return cursor.fetchall()
+
         except sqlite3.OperationalError as e:
-            logging.exception(f"Database error: {e}")
+            logger.exception(f"Database error: {e}")
             return []
     
     def log_request(self, file: str, chunk_number: int, result: ProcessingResult) -> int:
@@ -634,7 +664,7 @@ class Database:
         success, lastrowid = self._execute_query(cursor, query, params)  # Get both success and lastrowid
 
         if not success:
-            logging.error("Failed to log request. Exiting.")  # Log the error
+            logger.error("Failed to log request. Exiting.")  # Log the error
             raise RuntimeError("Failed to log request: {e}")  # Raise an exception
 
         self.connection.commit()
@@ -758,13 +788,6 @@ class Database:
 
         return summary
 
-
-def get_current_timestamp_iso():
-    """Returns current UTC timestamp in ISO 8601 format."""
-    return datetime.now(timezone.utc).isoformat()
-
-signal_received = False  # Add this global flag to avoid failures message duplication on terminal kill
-
 class DocumentAnalyzer:
     def __init__(self, config: ExtractorConfig, db: Database):
         self.config = config
@@ -802,8 +825,8 @@ class DocumentAnalyzer:
             if signal_received:
                 return None, "Request interrupted after response, during processing"
 
-            logging.debug(f"Status code: {response.status_code}")
-            logging.debug(f"Raw response: {response.text.strip()[:self.config.excerpt]}")
+            logger.debug(f"Status code: {response.status_code}")
+            logger.debug(f"Raw response: {response.text.strip()[:self.config.excerpt]}")
 
             if not response.text.strip():
                 return None, ""
@@ -819,20 +842,28 @@ class DocumentAnalyzer:
 
             return choice['message']['content'], json.dumps(response_data)
 
+        except requests.exceptions.HTTPError as e:
+            error_message = None
+            try:
+                error_message = f". Error message: {e.response.json().get('error', {}).get('message')}"
+            except:
+                pass #Ignore any error during json parsing.
+            logger.error(f"HTTP error making request to {self.config.inconfig_values.provider}: {e}{error_message or ''}")
+            return None, f"Request error: {e}{error_message or ''}"
         except requests.exceptions.RequestException as e:
-            logging.exception(f"Error making request to {self.config.inconfig_values.provider}: {e}")
+            logger.error(f"Error making request to {self.config.inconfig_values.provider}: {e}")
             return None, f"Request error: {e}"
         except json.JSONDecodeError as e:
-            logging.exception(f"Error decoding JSON response: {e}")
+            logger.error(f"Error decoding JSON response: {e}")
             return None, f"JSON decode error: {e}"
         except KeyError as e:
-            logging.exception(f"KeyError in JSON response: {e}")
+            logger.error(f"KeyError in JSON response: {e}")
             return None, f"Key error: {e}"
         except requests.exceptions.HTTPError as e:
-            logging.exception(f"HTTP Error: {e}")
+            logger.exception(f"HTTP Error: {e}")
             return None, f"HTTP Error: {e}"
         except Exception as e:
-            logging.exception(f"Unexpected error: {e}")
+            logger.exception(f"Unexpected error: {e}")
             return None, f"Unexpected error: {e}"
         
 
@@ -843,13 +874,13 @@ class DocumentAnalyzer:
             try:
                 json_string = match.group(1).strip()
                 json.loads(json_string)  # Just check if it's valid JSON
-                logging.debug("Aggressive JSON extraction from ```json block successful.")
+                logger.debug("Aggressive JSON extraction from ```json block successful.")
                 return json_string
             except json.JSONDecodeError as e:
-                logging.debug(f"Aggressive JSON decode error: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+                logger.debug(f"Aggressive JSON decode error: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
                 return response  # Return original response if aggressive cleaning fails
             except Exception as e:
-                logging.error(f"Unexpected error during aggressive ```json extraction: {e}")
+                logger.error(f"Unexpected error during aggressive ```json extraction: {e}")
                 return response  # Return original response on any other exception
         else:
             return response  # Return original response if no ```json block is found
@@ -863,17 +894,17 @@ class DocumentAnalyzer:
                 super_aggressive_cleaned_response = response[start:end + 1]
                 try:
                     json.loads(super_aggressive_cleaned_response)
-                    logging.debug("Super-aggressive JSON cleaning helped.")
-                    logging.debug(f"First {self.config.excerpt} characters of super-aggressively cleaned response: {super_aggressive_cleaned_response[:self.config.excerpt]}")
+                    logger.debug("Super-aggressive JSON cleaning helped.")
+                    logger.debug(f"First {self.config.excerpt} characters of super-aggressively cleaned response: {super_aggressive_cleaned_response[:self.config.excerpt]}")
                     return super_aggressive_cleaned_response
                 except json.JSONDecodeError as e:
-                    logging.error(f"Super-aggressive JSON cleaning failed: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+                    logger.error(f"Super-aggressive JSON cleaning failed: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
                     return response
             else:
-                logging.warning("Could not find JSON braces in the response.")
+                logger.warning("Could not find JSON braces in the response.")
                 return response
         except Exception as e:
-            logging.error(f"Unexpected error during super-aggressive cleaning: {e}")
+            logger.error(f"Unexpected error during super-aggressive cleaning: {e}")
             return response
 
 
@@ -891,38 +922,38 @@ class DocumentAnalyzer:
             return json.loads(cleaned_response)
             # return cleaned_response
         except (json.JSONDecodeError, TypeError) as e:
-            logging.debug(f"Initial JSON decode error: {e}. Response: {response[:self.config.excerpt]}")
+            logger.debug(f"Initial JSON decode error: {e}. Response: {response[:self.config.excerpt]}")
 
             # Attempt aggressive cleaning
             aggressive_cleaned = self._aggressive_json_cleaning(response)  # Call aggressive cleaning
             try:
                 json_response = json.loads(aggressive_cleaned)
-                logging.debug("Aggressive cleaning succeeded.")
+                logger.debug("Aggressive cleaning succeeded.")
                 return json_response
             except json.JSONDecodeError as e:
-                logging.debug(f"Aggressive cleaning failed: {e}. Aggressively cleaned response: {aggressive_cleaned[:self.config.excerpt]}")
+                logger.debug(f"Aggressive cleaning failed: {e}. Aggressively cleaned response: {aggressive_cleaned[:self.config.excerpt]}")
 
                 # Attempt super-aggressive cleaning
                 super_aggressive_cleaned = self._super_aggressive_json_cleaning(response) # Call super-aggressive cleaning
                 try:
                     json_response = json.loads(super_aggressive_cleaned)
-                    logging.debug("Super-aggressive cleaning succeeded.")
+                    logger.debug("Super-aggressive cleaning succeeded.")
                     return json_response
                 except json.JSONDecodeError as e:
-                    logging.warning(f"All cleaning attempts failed, even super-aggressive: {e}. Super-aggressively cleaned response: {super_aggressive_cleaned[:self.config.excerpt]}")
+                    logger.warning(f"All cleaning attempts failed, even super-aggressive: {e}. Super-aggressively cleaned response: {super_aggressive_cleaned[:self.config.excerpt]}")
                     return None  # Return None only after all attempts fail
 
         except Exception as e:
-            logging.error(f"Unexpected error during JSON cleaning: {e}. Response: {response[:self.config.excerpt]}")
+            logger.error(f"Unexpected error during JSON cleaning: {e}. Response: {response[:self.config.excerpt]}")
             return None  # Return None on any other exception
 
         '''except json.JSONDecodeError as e:
-            logging.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+            logger.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
             return self._aggressive_json_cleaning(response)  # Call aggressive cleaning
 
 
         except Exception as e:
-            logging.error(f"Unexpected error during initial cleaning: {e}")
+            logger.error(f"Unexpected error during initial cleaning: {e}")
             return response
         '''
     def calculate_chunks(self, filename: str) -> List[Tuple[int, int]]:
@@ -930,7 +961,7 @@ class DocumentAnalyzer:
             with open(filename, 'r', encoding='utf-8') as file:
                 content = file.read()
         except UnicodeDecodeError:
-            logging.exception(f"File {filename} is not valid UTF-8")
+            logger.exception(f"File {filename} is not valid UTF-8")
             raise
         
         if not content:
@@ -1018,7 +1049,7 @@ class DocumentAnalyzer:
                         request_id, filename, chunk_number, result.extracted_data
                     )
                 except sqlite3.OperationalError as e:
-                    logging.error(f"Error storing results: {e}. Check the {db.config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
+                    logger.error(f"Error storing results: {e}. Check the {db.config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
                     sys.exit(1) # instead of raise, as it's a standalone script and nothing will process the escalated error
 
             return result.success
@@ -1031,31 +1062,10 @@ class DocumentAnalyzer:
 
             db.log_request(filename, chunk_number, result)
 
-            if logging.getLogger().getEffectiveLevel() <= logging.DEBUG:  # Check if log level is DEBUG or lower
-                logging.exception("Error processing chunk (DEBUG mode):") # Log with traceback
+            if logger.get_log_level_name == "DEBUG":  # Check if log level is DEBUG or lower
+                logger.exception("Error processing chunk (DEBUG mode):") # Log with traceback
             else:
                 return False # Continue execution (as before)
-
-        
-def signal_handler(sig, frame, db_instance, start_iso):
-    """Handles Ctrl+C interrupt and prints a graceful message with stats."""
-    global signal_received
-    signal_received = True
-    logging.info('\nCtrl+C detected. Gracefully exiting...')
-    end_iso = get_current_timestamp_iso()
-
-    try:
-        if db_instance and db_instance.connection:
-            logging.info(db_instance.get_run_summary(start_iso, end_iso))
-        else:
-            logging.error("Database not initialized or connection closed.")
-    except Exception as e:
-        logging.exception(f"Error in signal handler: {e}")
-
-    if db_instance and db_instance.connection:
-        db_instance.close()
-
-    sys.exit(0)
     
 def main():
     global signal_received
@@ -1064,8 +1074,19 @@ def main():
     check_duplicate_args(sys.argv)
     args = parse_arguments()
     
-    setup_logger(args.log_level)
-    
+    logger.set_log_level(args.log_level)
+    logger.set_max_passable(
+        max_errors=MAX_PASSABLE_EXECUTION_ERRORS,
+        max_warnings=MAX_PASSABLE_WARNINGS,
+        error_message=collapse_whitespace("""
+        Too many execution errors ({max_errors}). Perhaps the LLM provider is down. Terminating process.
+        """),
+        warning_message=collapse_whitespace("""
+        Too many warnings ({max_warnings}) encountered,
+        likely from attempts to extract structured data from LLM responses,
+        which means your model can't handle it. Review logs and/or try to update prompt.
+        """)
+    )
     config = ConfigLoader.load_config_file(args.config)
 
     # Override defaults with command line arguments if provided
@@ -1091,22 +1112,24 @@ def main():
     try:
         ConfigLoader.validate_config_values(config)
     except ValueError as e:
-        logging.error(f"Configuration error: {e}")
+        logger.error(f"Configuration error: {e}")
         sys.exit(1)
 
-    logging.info("Welcome! Check README at Github for useful prompt engineering tips")
-    logging.info(f"Version {VERSION} started run at UTC {start_iso}")
+    # OK, settings are good, let's proceed
+
+    logger.info("Welcome! Check README at Github for useful prompt engineering tips")
+    logger.info(f"Version {VERSION} started run at UTC {start_iso}")
     if config.run_tag:  # Use config object
-        logging.info(f"Run Tag: {config.run_tag}")
-    logging.info("\n=== Using configuration:")
-    logging.info(f"Database: {config.results_db}")
-    logging.info(f"Context window: {config.inconfig_values.chunk_size}")
-    logging.info(f"Temperature: {config.inconfig_values.temperature}")
-    logging.info(f"LLM Excerpt Length: {config.excerpt}")
-    logging.info(f"Timeout: {config.inconfig_values.timeout}")
-    logging.info(f"Data folder: {config.inconfig_values.data_folder}")
-    logging.info(f"Max failures: {config.inconfig_values.max_failures}")
-    logging.info(f"Model: {config.inconfig_values.model}\n\nPress Ctrl-C to stop the run (you can continue later)\n")
+        logger.info(f"Run Tag: {config.run_tag}")
+    logger.info("\n=== Using configuration:")
+    logger.info(f"Database: {config.results_db}")
+    logger.info(f"Context window: {config.inconfig_values.chunk_size}")
+    logger.info(f"Temperature: {config.inconfig_values.temperature}")
+    logger.info(f"LLM Excerpt Length: {config.excerpt}")
+    logger.info(f"Timeout: {config.inconfig_values.timeout}")
+    logger.info(f"Data folder: {config.inconfig_values.data_folder}")
+    logger.info(f"Max failures: {config.inconfig_values.max_failures}")
+    logger.info(f"Model: {config.inconfig_values.model}\n\nPress Ctrl-C to stop the run (you can continue later)\n")
 
     with Database(config) as db:
         analyzer = DocumentAnalyzer(config, db)
@@ -1132,11 +1155,11 @@ def main():
                     unprocessed.extend(chunks)
 
                 if not unprocessed:
-                    logging.info("\nAll chunks processed or skipped!")
+                    logger.info("\nAll chunks processed or skipped!")
                     break
 
                 file, chunk_number = random.choice(unprocessed)
-                logging.info(f"Processing {file} chunk {chunk_number}")
+                logger.info(f"Processing {file} chunk {chunk_number}")
 
                 analyzer.process_chunk(
                     db=db,
@@ -1145,13 +1168,13 @@ def main():
                 )
 
                 if signal_received:
-                    logging.info("Loop interrupted by user.")
+                    logger.info("Loop interrupted by user.")
                     break
 
         finally:
             end_iso = get_current_timestamp_iso()
             if not signal_received:
-                logging.info(db.get_run_summary(start_iso, end_iso))
+                logger.info(db.get_run_summary(start_iso, end_iso))
 
 if __name__ == "__main__":
     main()

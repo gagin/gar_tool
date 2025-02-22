@@ -7,7 +7,7 @@ if git diff --quiet HEAD batch_doc_analyzer.py; then
     exit 0
 else
     # Exit code 1: Changes detected
-    if python update_version.py; then
+    if python dev_process_utils/update_version.py; then
         # Add the updated version file to the staging area
         git add batch_doc_analyzer.py
         echo "Hook: Version updated and staged."
