@@ -428,8 +428,7 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - explain that run_tag defailts to config file name, and how it can be used for model name and other parameters
 
 ### Technical
-- is required:false used, does it even make sense?
-- do i want to keep folder name? additional field without folder name?
+- do i want to keep folder name? additional field without folder name for test, so same file in different test folder can be easily identified?
 - implement multi-run with N of M?
 - investigate Error processing chunk: Invalid \escape: (happened when original doc had several backslashes as a placeholder, and then model was returning it and did not escape properly)
 - --structured_output=true/false/test with test is default

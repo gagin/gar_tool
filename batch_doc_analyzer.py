@@ -17,7 +17,7 @@ import requests.exceptions
 import traceback
 import logging_wrapper
 
-VERSION = '0.1.16' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.17' # requires major.minor.patch notation for auto-increment on commits via make command
 MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK = 5 # limit on maximum accepted value provided by the user
 MAX_PASSABLE_EXECUTION_ERRORS = 3 # for things like http errors, so loop with a wrong API key would terminate
 MAX_PASSABLE_WARNINGS=10 # stop if too many warnings, the model clearly can't handle it
@@ -71,6 +71,16 @@ def check_duplicate_args(argv): # Checks for duplicate named arguments and exits
                 logger.critical_exit(f"Error: Duplicate argument '{arg}' found.")
             seen_args.add(arg)
 
+def positive_int(value):
+    """Checks if a value is a positive integer."""
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value} is not an integer")
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
+    return ivalue
+
 def parse_arguments() -> Namespace:
     parser = argparse.ArgumentParser(description=collapse_whitespace("""
     This command-line tool extracts specific information from large collections of 
@@ -79,15 +89,15 @@ def parse_arguments() -> Namespace:
     once structured but is now in plain text, or when deriving new insights 
     from unstructured information. Ideal for data analysts and researchers who 
     need to convert unstructured or semi-structured text into analyzable data.
-    """), formatter_class=argparse.RawTextHelpFormatter)
+    """))
 
     config_group_control = parser.add_argument_group("Script control")    
     config_group_control.add_argument('--config', type=str, default='config.yaml', help=collapse_whitespace("""
         Path to the YAML configuration file containing extraction
         parameters (default: %(default)s).
     """))   
-    config_group_control.add_argument('--llm_debug_excerpt_length', type=int, default=200, help=collapse_whitespace("""
-        Maximum length (in characters) of LLM response excerpts displayed
+    config_group_control.add_argument('--max_log_length', type=positive_int, default=200, help=collapse_whitespace("""
+        Maximum length (in characters) of loggin messages (mostly to limit excerpts for prompts and responses)
         in debug logs (default: %(default)s).
     """))
     config_group_control.add_argument('--log_level', type=str, default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help=collapse_whitespace("""
@@ -175,7 +185,7 @@ class ExtractorConfig:
     key: Optional[str] = None
     skip_key_check: bool = False
     run_tag: Optional[str] = None
-    excerpt: int = 100
+#    excerpt: int = 100
     node_configs: Dict[str, Dict[str, Any]] = None #add node_configs to store all node configuration.
 
 class ConfigLoader:
@@ -308,11 +318,6 @@ class ConfigLoader:
         if settings.max_failures > MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK: 
             logger.critical_exit(f"Max failures cannot exceed {MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK}, got {settings.max_failures}") 
 
-        if not isinstance(config.excerpt, int): 
-            logger.critical_exit(f"LLM debug excerpt length must be an integer, got {type(config.excerpt)}") 
-        if config.excerpt <= 0: 
-            logger.critical_exit(f"LLM debug excerpt length must be positive, got {config.excerpt}") 
-
         data_folder = settings.data_folder #assign to a variable to avoid long lines 
         if not isinstance(data_folder, str): 
             logger.critical_exit(f"Data folder must be a string, got {type(data_folder)}") 
@@ -323,7 +328,11 @@ class ConfigLoader:
         if not os.path.isdir(data_folder): 
             logger.critical_exit(f"'{data_folder}' is not a directory") 
         if not os.access(data_folder, os.R_OK): 
-            logger.critical_exit(f"Data folder '{data_folder}' is not readable") 
+            logger.critical_exit(f"Data folder '{data_folder}' is not readable")
+        
+        if not os.access(config.results_db, os.W_OK):
+            logger.critical_exit(f"Database file '{config.results_db}' is not writable. Check file permissions.")
+
 
         if not isinstance(settings.model, str): 
             logger.critical_exit(f"Model must be a string, got {type(settings.model)}") 
@@ -815,7 +824,7 @@ class DocumentAnalyzer:
                 logger.debug("Aggressive JSON extraction from ```json block successful.")
                 return json_string
             except json.JSONDecodeError as e:
-                logger.debug(f"Aggressive JSON decode error: {e}. First {self.config.excerpt} characters of raw response: {response}")
+                logger.debug(f"Aggressive JSON decode error: {e}. Raw response: {response}")
                 return response  # Return original response if aggressive cleaning fails
             except Exception as e:
                 logger.error(f"Unexpected error during aggressive ```json extraction: {e}")
@@ -833,10 +842,10 @@ class DocumentAnalyzer:
                 try:
                     json.loads(super_aggressive_cleaned_response)
                     logger.debug("Super-aggressive JSON cleaning helped.")
-                    logger.debug(f"First {self.config.excerpt} characters of super-aggressively cleaned response: {super_aggressive_cleaned_response}")
+                    logger.debug(f"Super-aggressively cleaned response: {super_aggressive_cleaned_response}")
                     return super_aggressive_cleaned_response
                 except json.JSONDecodeError as e:
-                    logger.error(f"Super-aggressive JSON cleaning failed: {e}. First {self.config.excerpt} characters of raw response: {response}")
+                    logger.error(f"Super-aggressive JSON cleaning failed: {e}. Raw response: {response}")
                     return response
             else:
                 logger.warning("Could not find JSON braces in the response.")
@@ -1003,6 +1012,7 @@ def main():
     args = parse_arguments()
     
     logger.set_log_level(args.log_level)
+    logger.set_excerpt_length(args.max_log_length)
     logger.set_max_passable(
         max_errors=MAX_PASSABLE_EXECUTION_ERRORS,
         max_warnings=MAX_PASSABLE_WARNINGS,
@@ -1031,7 +1041,6 @@ def main():
     config.skip_key_check = args.skip_key_check
     if args.run_tag is not None: config.run_tag = args.run_tag
     else: config.run_tag = args.config
-    if args.llm_debug_excerpt_length is not None: config.excerpt = args.llm_debug_excerpt_length
 
     load_dotenv()
     key = os.getenv('OPENROUTER_API_KEY')
@@ -1044,8 +1053,6 @@ def main():
 
     # OK, settings are good, let's proceed
 
-    logger.set_excerpt_length(config.excerpt)
-
     logger.info("Welcome! Check README at Github for useful prompt engineering tips")
     logger.info(f"Version {VERSION} started run at UTC {start_iso}")
     if config.run_tag:  # Use config object
@@ -1054,7 +1061,7 @@ def main():
     logger.info(f"Database: {config.results_db}")
     logger.info(f"Context window: {config.inconfig_values.chunk_size}")
     logger.info(f"Temperature: {config.inconfig_values.temperature}")
-    logger.info(f"LLM Excerpt Length: {config.excerpt}")
+    # logger.info(f"LLM Excerpt Length: {config.excerpt}")
     logger.info(f"Timeout: {config.inconfig_values.timeout}")
     logger.info(f"Data folder: {config.inconfig_values.data_folder}")
     logger.info(f"Max failures: {config.inconfig_values.max_failures}")
