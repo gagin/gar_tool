@@ -17,7 +17,7 @@ import requests.exceptions
 import traceback
 import logging_wrapper
 
-VERSION = '0.1.15' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.16' # requires major.minor.patch notation for auto-increment on commits via make command
 MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK = 5 # limit on maximum accepted value provided by the user
 MAX_PASSABLE_EXECUTION_ERRORS = 3 # for things like http errors, so loop with a wrong API key would terminate
 MAX_PASSABLE_WARNINGS=10 # stop if too many warnings, the model clearly can't handle it
@@ -54,14 +54,22 @@ def signal_handler(sig, frame, db_instance, start_iso):
     sys.exit(0)
 
 def check_duplicate_args(argv): # Checks for duplicate named arguments and exits with an error if found.
+    """
+    Checks for duplicate named arguments and exits with an error.
+
+    Rationale:
+    Argparse silently overwrites duplicate single-value arguments, potentially
+    leading to user confusion and hidden errors. This function prevents this by
+    explicitly reporting duplicate named arguments, ensuring predictable and
+    transparent command-line argument handling.
+    """
     seen_args = set()
 
     for arg in argv[1:]:  # Start from index 1 to skip the script name
         if arg.startswith('--'):  # Named argument
             if arg in seen_args:
-                logger.error(f"Error: Duplicate argument '{arg}' found.")
-                sys.exit(1)
-                seen_args.add(arg)
+                logger.critical_exit(f"Error: Duplicate argument '{arg}' found.")
+            seen_args.add(arg)
 
 def parse_arguments() -> Namespace:
     parser = argparse.ArgumentParser(description=collapse_whitespace("""
@@ -73,23 +81,19 @@ def parse_arguments() -> Namespace:
     need to convert unstructured or semi-structured text into analyzable data.
     """), formatter_class=argparse.RawTextHelpFormatter)
 
-    config_group_control = parser.add_argument_group("Script control")
-    
+    config_group_control = parser.add_argument_group("Script control")    
     config_group_control.add_argument('--config', type=str, default='config.yaml', help=collapse_whitespace("""
         Path to the YAML configuration file containing extraction
         parameters (default: %(default)s).
-    """))
-    
+    """))   
     config_group_control.add_argument('--llm_debug_excerpt_length', type=int, default=200, help=collapse_whitespace("""
         Maximum length (in characters) of LLM response excerpts displayed
         in debug logs (default: %(default)s).
     """))
-
     config_group_control.add_argument('--log_level', type=str, default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help=collapse_whitespace("""
         Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         (default: %(default)s).
     """))
-
     config_group_control.add_argument("--version", action="version", version=f"%(prog)s {VERSION}", help=collapse_whitespace("""
         Show program's version number and exit.
     """))
@@ -100,14 +104,12 @@ def parse_arguments() -> Namespace:
     config_group_io.add_argument('--data_folder', type=str, help=collapse_whitespace("""
         Path to the directory containing the text files to process.
     """))
-
     config_group_io.add_argument('--chunk_size', type=int, help=collapse_whitespace("""
         Chunk size (in characters). Files exceeding this size will be
         split into chunks. The combined chunk and prompt must fit within
         the model's context window (measured in tokens, not characters).
         Token length varies by language. See the README for details.
     """))
-
     config_group_io.add_argument('--results_db', type=str, help=collapse_whitespace("""
         Name of the SQLite database file to store results. Be careful, the extension '.db' is not added automatically. 
         If this argument is not specified, the project name from the YAML configuration file
@@ -115,28 +117,23 @@ def parse_arguments() -> Namespace:
     """))
 
     config_group_ai = parser.add_argument_group("AI parameters (command line overwrites values from configuration YAML file)")
-
     config_group_ai.add_argument('--model', type=str, help=collapse_whitespace("""
         Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
     """))
-
     config_group_ai.add_argument('--provider', type=str, help=collapse_whitespace("""
         Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1').
         Default: OpenRouter.
     """))
-
     config_group_ai.add_argument('--skip_key_check', action='store_true', help=collapse_whitespace("""
         Skip API key check (use for models that don't require keys, or
         set OPENROUTER_API_KEY in .env to any non-empty value).
     """))
-
     config_group_ai.add_argument('--temperature', type=float, help=collapse_whitespace("""
         Temperature for model generation (0.0 to 1.0). Higher values
         increase creativity.  A value of 0 is recommended for predictable document processing.
     """))
 
     config_group_run = parser.add_argument_group("Run parameters (command line overwrites values from configuration YAML file)")
-
     config_group_run.add_argument('--run_tag', type=str, help=collapse_whitespace("""
         Tags records in the DATA table's 'run_tag' column with a run
         label for comparison testing (allowing duplication of
@@ -144,11 +141,9 @@ def parse_arguments() -> Namespace:
         runs based on model name, field order, temperature, or other variations.
         Default: file name of the YAML configuration.
     """))
-
     config_group_run.add_argument('--timeout', type=int, help=collapse_whitespace("""
         Timeout (in seconds) for requests to the LLM API.
     """))
-
     config_group_run.add_argument('--max_failures', type=int, help=collapse_whitespace("""
         Maximum number of consecutive failures allowed for a chunk before it
         is skipped.
@@ -181,128 +176,9 @@ class ExtractorConfig:
     skip_key_check: bool = False
     run_tag: Optional[str] = None
     excerpt: int = 100
-
+    node_configs: Dict[str, Dict[str, Any]] = None #add node_configs to store all node configuration.
 
 class ConfigLoader:
-    @staticmethod
-    def validate_file_config(config_data: Dict[str, Any]) -> None:
-        """Validate configuration parameters"""
-        if not isinstance(config_data, dict):
-            raise ValueError("Configuration must be a dictionary")
-            
-        # Validate required sections
-        required_sections = ['name', 'defaults', 'nodes', 'prompt_template']
-        for section in required_sections:
-            if section not in config_data:
-                raise ValueError(f"Missing required section: {section}")
-        
-        # Validate inconfig_values
-        defaults = config_data['defaults']
-        if not isinstance(defaults, dict):
-            raise ValueError("'defaults' must be a dictionary")
-            
-        # Values check is done after CLI overrides
-            
-        # Validate nodes
-        nodes = config_data['nodes']
-        if not isinstance(nodes, dict):
-            raise ValueError("'nodes' must be a dictionary")
-        for node_name, node_config in nodes.items():
-            if not isinstance(node_config, dict):
-                raise ValueError(f"Node '{node_name}' configuration must be a dictionary")
-            if 'description' not in node_config:
-                raise ValueError(f"Node '{node_name}' missing required 'description' field")
-            
-    def validate_config_values(config: ExtractorConfig) -> None:
-        """Validates input parameters, raising an exception on the first error.
-        Includes superficial API key validation.
-        Raises:
-            TypeError: If a parameter is of the wrong type.
-            ValueError: If a parameter's value is invalid.
-            FileNotFoundError: If the data folder does not exist.
-            NotADirectoryError: If the provided path is not a directory.
-            PermissionError: If the data folder is not readable.
-            ValueError: If API key is missing and not skipped.
-        """
-
-        settings = config.inconfig_values
-        if not isinstance(settings.temperature, (int, float)): 
-             logger.error(f"Temperature must be a number, got {type(settings.temperature)}") 
-             sys.exit(1)
-        if not (0 <= settings.temperature <= 1): 
-            logger.error(f"Temperature must be between 0 and 1, got {settings.temperature}") 
-            sys.exit(1)
-
-        if not isinstance(settings.chunk_size, int): 
-            logger.error(f"Context window must be an integer, got {type(settings.chunk_size)}") 
-            sys.exit(1)
-        if settings.chunk_size <= 0: 
-            logger.error(f"Context window must be positive, got {settings.chunk_size}") 
-            sys.exit(1)
-
-        if not isinstance(settings.timeout, int): 
-            logger.error(f"Timeout must be an integer, got {type(settings.timeout)}") 
-            sys.exit(1)
-        if settings.timeout <= 0: 
-            logger.error(f"Timeout must be positive, got {settings.timeout}") 
-            sys.exit(1)
-
-        if not isinstance(settings.max_failures, int): 
-            logger.error(f"Max failures must be an integer, got {type(settings.max_failures)}") 
-            sys.exit(1)
-        if settings.max_failures < 1: 
-            logger.error(f"Max failures must be at least 1, got {settings.max_failures}") 
-            sys.exit(1)
-        if settings.max_failures > MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK: 
-            logger.error(f"Max failures cannot exceed {MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK}, got {settings.max_failures}") 
-            sys.exit(1)
-
-        if not isinstance(config.excerpt, int): 
-            logger.error(f"LLM debug excerpt length must be an integer, got {type(config.excerpt)}") 
-            sys.exit(1)
-        if config.excerpt <= 0: 
-            logger.error(f"LLM debug excerpt length must be positive, got {config.excerpt}") 
-            sys.exit(1)
-
-        data_folder = settings.data_folder #assign to a variable to avoid long lines 
-        if not isinstance(data_folder, str): 
-            logger.error(f"Data folder must be a string, got {type(data_folder)}") 
-            sys.exit(1)
-        if not data_folder:  # Check for empty string 
-            logger.error("Data folder must be specified") 
-            sys.exit(1)
-        if not os.path.exists(data_folder): 
-            logger.error(f"Data folder '{data_folder}' does not exist") 
-            sys.exit(1)
-        if not os.path.isdir(data_folder): 
-            logger.error(f"'{data_folder}' is not a directory") 
-            sys.exit(1)
-        if not os.access(data_folder, os.R_OK): 
-            logger.error(f"Data folder '{data_folder}' is not readable") 
-            sys.exit(1)
-
-        if not isinstance(settings.model, str): 
-            logger.error(f"Model must be a string, got {type(settings.model)}") 
-            sys.exit(1)
-        if not settings.model:  # Check for empty string 
-            logger.error("Model cannot be empty") 
-            sys.exit(1)
-
-        if not isinstance(settings.provider, str): 
-            logger.error(f"Provider must be a string, got {type(settings.provider)}") 
-            sys.exit(1)
-        if not settings.provider:  # Check for empty string 
-            logger.error("Provider cannot be empty") 
-            sys.exit(1)
-
-        if not config.key and not config.skip_key_check:
-            error_message = collapse_whitespace("""
-                API key is missing. Either set the OPENROUTER_API_KEY environment variable,
-                or use --skip_key_check if the model does not require an API key.
-                """)
-            logger.error(error_message)
-            sys.exit(1) 
-        
     @staticmethod
     def load_config_file(config_path: str) -> ExtractorConfig:
         """Load and validate configuration from YAML file"""
@@ -326,14 +202,21 @@ class ConfigLoader:
             # Generate node descriptions for prompt
             node_descriptions = []
             db_mapping = {}
+            node_configs = {} #store all node configurations to use required property after
             for name, node in config_data['nodes'].items():
-                description = f"- {name}: {node['description']}"
+                description = f"- {name}"
+                if node.get('required') is False:  # Add optional marker
+                    description += " (optional)"
+                elif node.get('required') is True: # Add required marker.
+                    description += " (required)"
+                description += f": {node['description']}"
                 if node.get('format'):
                     description += f" ({node['format']})"
                 node_descriptions.append(description)
-                
+
                 if 'db_column' in node:
                     db_mapping[name] = node['db_column']
+                node_configs[name] = node #store node configuration
 
             # Format prompt with node descriptions
             prompt = config_data['prompt_template'].format(
@@ -345,19 +228,119 @@ class ConfigLoader:
                 inconfig_values=defaults,
                 prompt=prompt,
                 expected_json_nodes=list(config_data['nodes'].keys()),
-                db_mapping=db_mapping
+                db_mapping=db_mapping,
+                node_configs = node_configs,
             )
             
         except FileNotFoundError:
-            logger.error(f"Configuration file not found: {config_path}")
-            sys.exit(1)
+            logger.critical_exit(f"Configuration file not found: {config_path}")
             # raise ValueError(f"Configuration file not found: {config_path}")
         except yaml.YAMLError as e:
-            logger.error(f"Invalid YAML in configuration file: {e}")
-            sys.exit(1)
+            logger.critical_exit(f"Invalid YAML in configuration file: {e}")
             # raise ValueError(f"Invalid YAML in configuration file: {e}")
 
+    @staticmethod
+    def validate_file_config(config_data: Dict[str, Any]) -> None:
+        """Validate configuration parameters"""
+        if not isinstance(config_data, dict):
+            logger.critical_exit("Configuration must be a dictionary.")
+        
+        # Validate required sections
+        required_sections = ['name', 'defaults', 'nodes', 'prompt_template']
+        for section in required_sections:
+            if section not in config_data:
+                logger.critical_exit(f"Missing required section: {section}.")
+        
+        # Validate inconfig_values
+        defaults = config_data['defaults']
+        if not isinstance(defaults, dict):
+            logger.critical_exit("'defaults' must be a dictionary.")
+            
+        # Values check is done after CLI overrides
+            
+        # Validate nodes
+        nodes = config_data['nodes']
+        if not isinstance(nodes, dict):
+            logger.critical_exit("'nodes' must be a dictionary.")
+        for node_name, node_config in nodes.items():
+            if not isinstance(node_config, dict):
+                logger.critical_exit(f"Node '{node_name}' configuration must be a dictionary.")
+            if 'description' not in node_config:
+                logger.critical_exit(f"Node '{node_name}' missing required 'description' field.")
+            if 'required' in node_config and not isinstance(node_config['required'], bool):
+                logger.critical_exit(f"Invalid 'required' value for node '{node_name}'. Must be boolean (true or false).")
 
+            
+    def validate_config_values(config: ExtractorConfig) -> None:
+        """Validates input parameters, exiting with an error message on the first error.
+        Includes superficial API key validation.
+
+        Exits:
+            1: If any of the following conditions are met:
+                - A parameter is of the wrong type or has an invalid value.
+                - The data folder does not exist or is not accessible.
+                - The API key is missing and not skipped.
+        """
+
+        settings = config.inconfig_values
+        if not isinstance(settings.temperature, (int, float)): 
+            logger.critical_exit(f"Temperature must be a number, got {type(settings.temperature)}") 
+        if not (0 <= settings.temperature <= 1): 
+            logger.critical_exit(f"Temperature must be between 0 and 1, got {settings.temperature}") 
+
+        if not isinstance(settings.chunk_size, int): 
+            logger.critical_exit(f"Context window must be an integer, got {type(settings.chunk_size)}") 
+
+        if settings.chunk_size <= 0: 
+            logger.critical_exit(f"Context window must be positive, got {settings.chunk_size}") 
+
+        if not isinstance(settings.timeout, int): 
+            logger.critical_exit(f"Timeout must be an integer, got {type(settings.timeout)}") 
+
+        if settings.timeout <= 0: 
+            logger.critical_exit(f"Timeout must be positive, got {settings.timeout}") 
+
+        if not isinstance(settings.max_failures, int): 
+            logger.critical_exit(f"Max failures must be an integer, got {type(settings.max_failures)}") 
+
+        if settings.max_failures < 1: 
+            logger.critical_exit(f"Max failures must be at least 1, got {settings.max_failures}") 
+        if settings.max_failures > MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK: 
+            logger.critical_exit(f"Max failures cannot exceed {MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK}, got {settings.max_failures}") 
+
+        if not isinstance(config.excerpt, int): 
+            logger.critical_exit(f"LLM debug excerpt length must be an integer, got {type(config.excerpt)}") 
+        if config.excerpt <= 0: 
+            logger.critical_exit(f"LLM debug excerpt length must be positive, got {config.excerpt}") 
+
+        data_folder = settings.data_folder #assign to a variable to avoid long lines 
+        if not isinstance(data_folder, str): 
+            logger.critical_exit(f"Data folder must be a string, got {type(data_folder)}") 
+        if not data_folder:  # Check for empty string 
+            logger.critical_exit("Data folder must be specified") 
+        if not os.path.exists(data_folder): 
+            logger.critical_exit(f"Data folder '{data_folder}' does not exist") 
+        if not os.path.isdir(data_folder): 
+            logger.critical_exit(f"'{data_folder}' is not a directory") 
+        if not os.access(data_folder, os.R_OK): 
+            logger.critical_exit(f"Data folder '{data_folder}' is not readable") 
+
+        if not isinstance(settings.model, str): 
+            logger.critical_exit(f"Model must be a string, got {type(settings.model)}") 
+        if not settings.model:  # Check for empty string 
+            logger.critical_exit("Model cannot be empty") 
+
+        if not isinstance(settings.provider, str): 
+            logger.critical_exit(f"Provider must be a string, got {type(settings.provider)}") 
+        if not settings.provider:  # Check for empty string 
+            logger.critical_exit("Provider cannot be empty") 
+
+        if not config.key and not config.skip_key_check:
+            error_message = collapse_whitespace("""
+                API key is missing. Either set the OPENROUTER_API_KEY environment variable,
+                or use --skip_key_check if the model does not require an API key.
+                """)
+            logger.critical_exit(error_message)
 
 @dataclass
 class Column:
@@ -436,25 +419,21 @@ class Database:
             result = cursor.fetchone()
             if result[0] != 'ok':
                 self.connection.close()
-                logger.error(f"The file '{db_path}' is not a valid SQLite database (integrity check failed). Error: {result[0]}")
-                sys.exit(1)
+                logger.critical_exit(f"The file '{db_path}' is not a valid SQLite database (integrity check failed). Error: {result[0]}")
 
             return self.connection  # Return connection only if successful and integrity check passes
 
         except sqlite3.OperationalError as e:  # Catch specific OperationalErrors
             self.connection = None # Ensure connection is None if it failed.
             if os.path.isdir(db_path):
-                logger.error(f"The path '{db_path}' is a directory, not a file.")
-                sys.exit(1)
+                logger.critical_exit(f"The path '{db_path}' is a directory, not a file.")
 
             try:
                 mode = os.stat(db_path).st_mode
                 if not (stat.S_IREAD & mode and stat.S_IWRITE & mode):
-                    logger.error(f"The file '{db_path}' does not have read and write permissions.")
-                    sys.exit(1)
+                    logger.critical_exit(f"The file '{db_path}' does not have read and write permissions.")
             except FileNotFoundError:  # Handle the case where the file doesn't exist
-                logger.error(f"The file '{db_path}' was not found.")
-                sys.exit(1)
+                logger.critical_exit(f"The file '{db_path}' was not found.")
             except Exception as perm_e:
                 logger.error(f"An unexpected error occurred when checking file permissions: {perm_e}")
                 raise  # Re-raise for higher-level handling
@@ -462,18 +441,15 @@ class Database:
             try:
                 parent_dir = os.path.dirname(db_path)
                 if not os.access(parent_dir, os.W_OK):
-                    logger.error(f"The directory '{parent_dir}' does not have write permissions.")
-                    sys.exit(1)
+                    logger.critical_exit(f"The directory '{parent_dir}' does not have write permissions.")
             except Exception as dir_perm_e:
                 logger.error(f"An unexpected error occurred when checking directory permissions: {dir_perm_e}")
                 raise  # Re-raise
 
-            logger.error(f"An OperationalError occurred: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
-            sys.exit(1) # Exit after logging the error
+            logger.critical_exit(f"An OperationalError occurred: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
 
         except sqlite3.DatabaseError as e:  # Catch other DatabaseErrors
-            logger.error(f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
-            sys.exit(1)
+            logger.critical_exit(f"The file '{db_path}' is not a valid SQLite database. Underlying error: {e}. SQLite Error Code: {getattr(e, 'sqlite_errorcode', None)}")
 
         except Exception as e:  # Catch any other unexpected exceptions
             logger.exception(f"An unexpected error occurred: {e}") # Use logger.exception to include traceback
@@ -505,17 +481,13 @@ class Database:
                     lastrowid = cursor.lastrowid
         except sqlite3.OperationalError as e:
             if hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_LOCKED:
-                logger.error(f"Database locked: {e}")
-                sys.exit(1)
+                logger.critical_exit(f"Database locked: {e}")
             elif hasattr(e, 'sqlite_errorcode') and e.sqlite_errorcode == sqlite3.SQLITE_BUSY:
-                logger.error(f"The database file is busy, do you have unsaved changes in DB Browser? [Operation returned: {e}]")
-                sys.exit(1)    
+                logger.critical_exit(f"The database file is busy, do you have unsaved changes in DB Browser? [Operation returned: {e}]")
             else:
-                logger.error(f"Database OperationalError: {e}")
-                sys.exit(1)
+                logger.critical_exit(f"Database OperationalError: {e}")
         except Exception as e:
-            logger.exception(f"An unexpected error occurred during database operation: {e}")
-            sys.exit(1)
+            logger.critical_exit(f"An unexpected error occurred during database operation: {e}")
 
         return True, lastrowid  # Return True and lastrowid (or None)
 
@@ -608,8 +580,7 @@ class Database:
         params = [(file, i, chunk[0], chunk[1]) for i, chunk in enumerate(chunks)]
 
         if not self._execute_many(cursor, query, params):  # Use the new _execute_many
-            logger.error("Failed to insert chunks to the db")
-            sys.exit(1)
+            logger.critical_exit("Failed to insert chunks to the db")
 
         self.connection.commit()
     
@@ -661,11 +632,11 @@ class Database:
         query = 'INSERT INTO REQUEST_LOG (file, chunknumber, timestamp, model, raw_response, success, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)'
         params = (file, chunk_number, datetime.now(timezone.utc).isoformat(), self.config.inconfig_values.model, result.raw_response, result.success, result.error_message)
 
-        success, lastrowid = self._execute_query(cursor, query, params)  # Get both success and lastrowid
+        success, lastrowid = self._execute_query(cursor, query, params)
 
         if not success:
-            logger.error("Failed to log request. Exiting.")  # Log the error
-            raise RuntimeError("Failed to log request: {e}")  # Raise an exception
+            logger.error("Failed to log request. Exiting.")
+            raise RuntimeError("Failed to log request: {e}")
 
         self.connection.commit()
         return lastrowid if lastrowid is not None else -1 # Return lastrowid or -1 on failure
@@ -677,9 +648,14 @@ class Database:
         values = [request_id, file, chunk_number]
 
         for json_node, db_column in self.config.db_mapping.items():
-            if json_node in data:
-                columns.append(db_column)
-                values.append(data[json_node])
+            value_to_append = data.get(json_node)
+
+            if self.config.node_configs.get(json_node).get('required') is True: # was that node requested as required in the config?
+                if value_to_append is None: # yaml didn't say that node was optional, but llm did not return it
+                    logger.warning(f"Required node '{json_node}' missing from LLM response for file '{file}', chunk {chunk_number}.")
+
+            columns.append(db_column)
+            values.append(value_to_append)
 
         # Add run_tag if it exists
         if self.config.run_tag is not None:
@@ -693,45 +669,7 @@ class Database:
             return  # Or raise an exception if you prefer
 
         self.connection.commit()
-    '''    
-    def log_request(self, file: str, chunk_number: int, 
-                   model: str, result: ProcessingResult) -> int:
-        cursor = self.connection.cursor()
-        cursor.execute(
-            'INSERT INTO REQUEST_LOG '
-            '(file, chunknumber, timestamp, model, raw_response, success, error_message) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?)',
-            (file, chunk_number, datetime.now(timezone.utc).isoformat(), model, 
-             result.raw_response, result.success, result.error_message)
-        )
-        self.connection.commit()
-        return cursor.lastrowid
-    
-    def store_results(self, request_id: int, file: str, 
-                     chunk_number: int, data: Dict[str, Any]):
-        cursor = self.connection.cursor()
-        
-        columns = ['request_id', 'file', 'chunknumber']
-        values = [request_id, file, chunk_number]
-        
-        for json_node, db_column in self.config.db_mapping.items():
-            if json_node in data:
-                columns.append(db_column)
-                values.append(data[json_node])
 
-        # Add run_tag if it exists
-        if self.config.run_tag is not None:
-            columns.append('run_tag')
-            values.append(self.config.run_tag)
-        
-        placeholders = ','.join(['?' for _ in values])
-        cursor.execute(
-            f'INSERT INTO {self.config.results_table} '
-            f'({",".join(columns)}) VALUES ({placeholders})',
-            values
-        )
-        self.connection.commit()
-    '''   
     def close(self):
         if self.connection:
             self.connection.close()
@@ -797,7 +735,7 @@ class DocumentAnalyzer:
         global signal_received
         if signal_received:
             return None, "Request skipped due to interrupt."
-        
+
         try:
             headers = {
                 "Authorization": f"Bearer {self.config.key}",
@@ -826,7 +764,7 @@ class DocumentAnalyzer:
                 return None, "Request interrupted after response, during processing"
 
             logger.debug(f"Status code: {response.status_code}")
-            logger.debug(f"Raw response: {response.text.strip()[:self.config.excerpt]}")
+            logger.debug(f"Raw response: {response.text.strip()}")
 
             if not response.text.strip():
                 return None, ""
@@ -877,7 +815,7 @@ class DocumentAnalyzer:
                 logger.debug("Aggressive JSON extraction from ```json block successful.")
                 return json_string
             except json.JSONDecodeError as e:
-                logger.debug(f"Aggressive JSON decode error: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+                logger.debug(f"Aggressive JSON decode error: {e}. First {self.config.excerpt} characters of raw response: {response}")
                 return response  # Return original response if aggressive cleaning fails
             except Exception as e:
                 logger.error(f"Unexpected error during aggressive ```json extraction: {e}")
@@ -895,10 +833,10 @@ class DocumentAnalyzer:
                 try:
                     json.loads(super_aggressive_cleaned_response)
                     logger.debug("Super-aggressive JSON cleaning helped.")
-                    logger.debug(f"First {self.config.excerpt} characters of super-aggressively cleaned response: {super_aggressive_cleaned_response[:self.config.excerpt]}")
+                    logger.debug(f"First {self.config.excerpt} characters of super-aggressively cleaned response: {super_aggressive_cleaned_response}")
                     return super_aggressive_cleaned_response
                 except json.JSONDecodeError as e:
-                    logger.error(f"Super-aggressive JSON cleaning failed: {e}. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
+                    logger.error(f"Super-aggressive JSON cleaning failed: {e}. First {self.config.excerpt} characters of raw response: {response}")
                     return response
             else:
                 logger.warning("Could not find JSON braces in the response.")
@@ -922,7 +860,7 @@ class DocumentAnalyzer:
             return json.loads(cleaned_response)
             # return cleaned_response
         except (json.JSONDecodeError, TypeError) as e:
-            logger.debug(f"Initial JSON decode error: {e}. Response: {response[:self.config.excerpt]}")
+            logger.debug(f"Initial JSON decode error: {e}. Response: {response}")
 
             # Attempt aggressive cleaning
             aggressive_cleaned = self._aggressive_json_cleaning(response)  # Call aggressive cleaning
@@ -931,7 +869,7 @@ class DocumentAnalyzer:
                 logger.debug("Aggressive cleaning succeeded.")
                 return json_response
             except json.JSONDecodeError as e:
-                logger.debug(f"Aggressive cleaning failed: {e}. Aggressively cleaned response: {aggressive_cleaned[:self.config.excerpt]}")
+                logger.debug(f"Aggressive cleaning failed: {e}. Aggressively cleaned response: {aggressive_cleaned}")
 
                 # Attempt super-aggressive cleaning
                 super_aggressive_cleaned = self._super_aggressive_json_cleaning(response) # Call super-aggressive cleaning
@@ -940,22 +878,13 @@ class DocumentAnalyzer:
                     logger.debug("Super-aggressive cleaning succeeded.")
                     return json_response
                 except json.JSONDecodeError as e:
-                    logger.warning(f"All cleaning attempts failed, even super-aggressive: {e}. Super-aggressively cleaned response: {super_aggressive_cleaned[:self.config.excerpt]}")
+                    logger.warning(f"All cleaning attempts failed, even super-aggressive: {e}. Super-aggressively cleaned response: {super_aggressive_cleaned}")
                     return None  # Return None only after all attempts fail
 
         except Exception as e:
-            logger.error(f"Unexpected error during JSON cleaning: {e}. Response: {response[:self.config.excerpt]}")
+            logger.error(f"Unexpected error during JSON cleaning: {e}. Response: {response}")
             return None  # Return None on any other exception
 
-        '''except json.JSONDecodeError as e:
-            logger.debug(f"Initial JSON decode error: {e}. Attempting aggressive cleaning. First {self.config.excerpt} characters of raw response: {response[:self.config.excerpt]}")
-            return self._aggressive_json_cleaning(response)  # Call aggressive cleaning
-
-
-        except Exception as e:
-            logger.error(f"Unexpected error during initial cleaning: {e}")
-            return response
-        '''
     def calculate_chunks(self, filename: str) -> List[Tuple[int, int]]:
         try:
             with open(filename, 'r', encoding='utf-8') as file:
@@ -1049,8 +978,7 @@ class DocumentAnalyzer:
                         request_id, filename, chunk_number, result.extracted_data
                     )
                 except sqlite3.OperationalError as e:
-                    logger.error(f"Error storing results: {e}. Check the {db.config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
-                    sys.exit(1) # instead of raise, as it's a standalone script and nothing will process the escalated error
+                    logger.critical_exit(f"Error storing results: {e}. Check the {db.config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
 
             return result.success
         except Exception as e:
@@ -1062,7 +990,7 @@ class DocumentAnalyzer:
 
             db.log_request(filename, chunk_number, result)
 
-            if logger.get_log_level_name == "DEBUG":  # Check if log level is DEBUG or lower
+            if logger.get_log_level_name == "DEBUG":
                 logger.exception("Error processing chunk (DEBUG mode):") # Log with traceback
             else:
                 return False # Continue execution (as before)
@@ -1087,7 +1015,7 @@ def main():
         which means your model can't handle it. Review logs and/or try to update prompt.
         """)
     )
-    config = ConfigLoader.load_config_file(args.config)
+    config: ExtractorConfig = ConfigLoader.load_config_file(args.config)
 
     # Override defaults with command line arguments if provided
     if args.chunk_size is not None: config.inconfig_values.chunk_size = args.chunk_size
@@ -1112,10 +1040,11 @@ def main():
     try:
         ConfigLoader.validate_config_values(config)
     except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        sys.exit(1)
+        logger.critical_exit(f"Configuration error: {e}")
 
     # OK, settings are good, let's proceed
+
+    logger.set_excerpt_length(config.excerpt)
 
     logger.info("Welcome! Check README at Github for useful prompt engineering tips")
     logger.info(f"Version {VERSION} started run at UTC {start_iso}")
@@ -1129,8 +1058,9 @@ def main():
     logger.info(f"Timeout: {config.inconfig_values.timeout}")
     logger.info(f"Data folder: {config.inconfig_values.data_folder}")
     logger.info(f"Max failures: {config.inconfig_values.max_failures}")
+    logger.debug(f"LLM prompt: {config.prompt}")
     logger.info(f"Model: {config.inconfig_values.model}\n\nPress Ctrl-C to stop the run (you can continue later)\n")
-
+ 
     with Database(config) as db:
         analyzer = DocumentAnalyzer(config, db)
         signal.signal(signal.SIGINT, lambda sig, frame: signal_handler(sig, frame, db, start_iso))
