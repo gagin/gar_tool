@@ -12,12 +12,10 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any, Tuple, SupportsFloat, Callable
 from dotenv import load_dotenv
 import requests
-import requests.exceptions
-#import time
 import traceback
 import logging_wrapper
 
-VERSION = '0.1.17' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.18' # requires major.minor.patch notation for auto-increment on commits via make command
 MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK = 5 # limit on maximum accepted value provided by the user
 MAX_PASSABLE_EXECUTION_ERRORS = 3 # for things like http errors, so loop with a wrong API key would terminate
 MAX_PASSABLE_WARNINGS=10 # stop if too many warnings, the model clearly can't handle it
@@ -330,8 +328,23 @@ class ConfigLoader:
         if not os.access(data_folder, os.R_OK): 
             logger.critical_exit(f"Data folder '{data_folder}' is not readable")
         
-        if not os.access(config.results_db, os.W_OK):
-            logger.critical_exit(f"Database file '{config.results_db}' is not writable. Check file permissions.")
+        if not isinstance(config.results_db, str): 
+            logger.critical_exit(f"Database name must be a string, got {type(config.results_db)}") 
+        if not config.results_db:  # Check for empty string 
+            logger.critical_exit("Database name cannot be empty") 
+        if os.path.isdir(config.results_db):
+            logger.critical_exit(f"Database name '{config.results_db}' is a directory, not a file.")
+        if os.path.exists(config.results_db): # if db file already exists, then check for permissions.
+          if not os.access(config.results_db, os.W_OK):
+              logger.critical_exit(f"Database file '{config.results_db}' is not writable. Check file permissions.")
+        else: # otherwise, db file will be created, but its parent folder should have permissions
+            parent_dir = os.path.dirname(config.results_db)
+            if parent_dir: # if not empty, check for permissions.
+                if not os.access(parent_dir, os.W_OK):
+                    logger.critical_exit(f"The directory '{parent_dir}' does not have write permissions to create the database file.")
+                else: # parent dir is empty, it means we write in current dir, so we need to check it.
+                    if not os.access(".", os.W_OK):
+                        logger.critical_exit("The current directory does not have write permissions to create the database file.")
 
 
         if not isinstance(settings.model, str): 
@@ -748,7 +761,9 @@ class DocumentAnalyzer:
         try:
             headers = {
                 "Authorization": f"Bearer {self.config.key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                'HTTP-Referer': 'https://github.com/gagin/batch_doc_analyzer/',
+                'X-Title': 'GAR: batch-doc-analyzer'
             }
 
             data = {
@@ -987,7 +1002,7 @@ class DocumentAnalyzer:
                         request_id, filename, chunk_number, result.extracted_data
                     )
                 except sqlite3.OperationalError as e:
-                    logger.critical_exit(f"Error storing results: {e}. Check the {db.config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
+                    logger.critical_exit(f"Error storing results into the database file: {e}. Check the {db.config.results_table} table schema. File: {filename}, Chunk: {chunk_number}")
 
             return result.success
         except Exception as e:
