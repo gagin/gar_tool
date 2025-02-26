@@ -15,7 +15,7 @@ import requests
 import traceback
 import logging_wrapper
 
-VERSION = '0.1.18' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.19' # requires major.minor.patch notation for auto-increment on commits via make command
 MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK = 5 # limit on maximum accepted value provided by the user
 MAX_PASSABLE_EXECUTION_ERRORS = 3 # for things like http errors, so loop with a wrong API key would terminate
 MAX_PASSABLE_WARNINGS=10 # stop if too many warnings, the model clearly can't handle it
@@ -669,17 +669,23 @@ class Database:
         columns = ['request_id', 'file', 'chunknumber']
         values = [request_id, file, chunk_number]
 
-        for json_node, db_column in self.config.db_mapping.items():
-            value_to_append = data.get(json_node)
+        # Create a list of columns from your schema
+        results_columns_names = self.schema['RESULTS'].get_column_names()
 
-            if self.config.node_configs.get(json_node).get('required') is True: # was that node requested as required in the config?
-                if value_to_append is None: # yaml didn't say that node was optional, but llm did not return it
-                    logger.warning(f"Required node '{json_node}' missing from LLM response for file '{file}', chunk {chunk_number}.")
+        for col_name in results_columns_names: # Iterate directly through column names from schema.
+          if col_name in ('request_id', 'file', 'chunknumber', 'run_tag'):
+            continue # Skip these columns, they were already added before the loop.
+          
+          json_node = next((k for k, v in self.config.db_mapping.items() if v == col_name), None)
+          if json_node is None:
+            logger.error(f"Column '{col_name}' not found in the db_mapping. This could be a problem in the YAML configuration file. Skipping.")
+            continue # Skip the column
 
-            columns.append(db_column)
-            values.append(value_to_append)
+          value_to_append = data.get(json_node) # Retrieve value for optional nodes
+          columns.append(col_name)
+          values.append(value_to_append)
 
-        # Add run_tag if it exists
+        # Add run_tag if it exists and required
         if self.config.run_tag is not None:
             columns.append('run_tag')
             values.append(self.config.run_tag)
@@ -688,9 +694,12 @@ class Database:
         query = f'INSERT INTO {self.config.results_table} ({",".join(columns)}) VALUES ({placeholders})'
 
         if not self._execute_query(cursor, query, values):  # Use the wrapper
+            logger.exception(f"Error storing results into the database file: {e}. Check the {self.config.results_table} table schema. File: {file}, Chunk: {chunk_number}")
             return  # Or raise an exception if you prefer
 
         self.connection.commit()
+
+
 
     def close(self):
         if self.connection:
@@ -976,16 +985,22 @@ class DocumentAnalyzer:
                         error_message="Failed to extract valid JSON"  # Clearer error message
                     )
                 else:
+                    """ before making some nodes optional
                     missing_nodes = [
                         node for node in self.db.config.expected_json_nodes
                         if node not in json_response
                     ]
+                    """
+                    missing_required_nodes = [
+                        node for node in self.db.config.expected_json_nodes
+                        if node not in json_response and self.config.node_configs[node].get('required', False) # False is not comparison, but not found case
+                    ]
 
-                    if missing_nodes:
+                    if missing_required_nodes:
                         result = ProcessingResult(
                             success=False,
                             raw_response=full_response,
-                            error_message=f"Missing expected nodes: {missing_nodes}"
+                            error_message=f"Missing expected nodes: {missing_required_nodes}"
                         )
                     else:
                         result = ProcessingResult(
