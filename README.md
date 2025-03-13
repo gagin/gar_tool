@@ -433,5 +433,6 @@ Claude 3.5 Sonnet handled most of the coding, with Google Gemini contributing sm
 - investigate Error processing chunk: Invalid \escape: (happened when original doc had several backslashes as a placeholder, and then model was returning it and did not escape properly)
 - --structured_output=true/false/test with test is default
 - Make a temp table where script instances will register which piece they picked up for processing - this way it'll be much less likely to pick same piece multiple times, as it happens now when between random pick and record there's LLM response wait time
+- support usage of free versions of the models until the daily limit exceeded
 
 

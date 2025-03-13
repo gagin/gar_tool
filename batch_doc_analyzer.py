@@ -15,7 +15,7 @@ import requests
 import traceback
 import logging_wrapper
 
-VERSION = '0.1.19' # requires major.minor.patch notation for auto-increment on commits via make command
+VERSION = '0.1.20' # requires major.minor.patch notation for auto-increment on commits via make command
 MAX_LLM_EXTRACTION_FAILURES_LIMIT_PER_CHUNK = 5 # limit on maximum accepted value provided by the user
 MAX_PASSABLE_EXECUTION_ERRORS = 3 # for things like http errors, so loop with a wrong API key would terminate
 MAX_PASSABLE_WARNINGS=10 # stop if too many warnings, the model clearly can't handle it
@@ -769,12 +769,14 @@ class DocumentAnalyzer:
 
         try:
             headers = {
-                "Authorization": f"Bearer {self.config.key}",
+                #"Authorization": f"Bearer {self.config.key}",
                 "Content-Type": "application/json",
                 'HTTP-Referer': 'https://github.com/gagin/batch_doc_analyzer/',
                 'X-Title': 'GAR: batch-doc-analyzer'
             }
-
+            if not self.config.skip_key_check:
+                headers["Authorization"] = f"Bearer {self.config.key}"
+                
             data = {
                 "model": self.config.inconfig_values.model,
                 "messages": [
