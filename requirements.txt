@@ -1,0 +1,15 @@
+# requirements.txt
+
+# Core dependencies for configuration, API keys, and LLM requests
+PyYAML>=6.0,<7.0             # For reading config.yaml
+python-dotenv>=1.0,<2.0     # For reading .env files (e.g., API keys)
+requests>=2.30,<3.0         # For making HTTP requests to LLM APIs
+
+# File conversion library (base package)
+# NOTE: Requires installing extras for specific formats, see README.rst
+# Example: pip install "markitdown-python[pdf,docx,pptx]"
+markitdown-python>=0.4.0,<0.5.0
+
+# Optional, but recommended for development/linting:
+# flake8>=7.0,<8.0
+# black>=24.0,<25.0
