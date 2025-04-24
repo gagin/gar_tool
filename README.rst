@@ -176,13 +176,13 @@ Installation
 
 1.  **Prerequisites**: Python 3.9+ and `pip`.
 2.  **Virtual Environment (Recommended)**:
-    .. code-block:: bash
+    .. code-block:: 
 
         python -m venv venv
         source venv/bin/activate  # On Windows use `venv\Scripts\activate`
 3.  **Install Dependencies**:
     Create a `requirements.txt` file (or use the one provided if available) with contents like:
-    .. code-block:: text
+    .. code-block::
 
         PyYAML>=6.0,<7.0
         python-dotenv>=1.0,<2.0
@@ -190,12 +190,12 @@ Installation
         markitdown-python>=0.4.0,<0.5.0
 
     Then install:
-    .. code-block:: bash
+    .. code-block:: 
 
         pip install -r requirements.txt
 
 4.  **Install `markitdown` Extras**: For PDF, DOCX, and PPTX support, install the necessary optional dependencies:
-    .. code-block:: bash
+    .. code-block:: 
 
         # Install support for specific formats you need:
         pip install "markitdown[pdf,docx,pptx]"
@@ -204,7 +204,7 @@ Installation
         # pip install "markitdown[all]"
 
 5.  **API Key**: Create a `.env` file in the project root directory (where you run the command from) with your LLM provider API key (e.g., for OpenRouter):
-    .. code-block:: text
+    .. code-block:: 
 
         # .env file
         OPENROUTER_API_KEY="sk-or-v1-..."
@@ -216,8 +216,7 @@ Extraction Process
 
 1.  **Place Source Files**: Put your documents (`.pdf`, `.docx`, `.pptx`, `.md`, `.txt`) into the directory specified by `--data_folder` (or the default `./art-source`).
 2.  **Run the Extractor**: Execute the main module from the project root directory.
-    .. code-block:: bash
-
+    .. code-block:: 
         python -m gar_tool.main --config config.yaml --data_folder ./art-source
 
     *   Use `--help` to see all command-line options which can override `config.yaml` settings.
@@ -251,11 +250,14 @@ Results in SQLite (`public_art_vancouver.db`, `DATA` table)
 
 Use a tool like [DB Browser for SQLite](https://sqlitebrowser.org/) to view the database.
 
-| request_id | file                                                        | chunknumber | run_tag     | name   | address                   | first_nations | first_nations_quote                                 | instagrammability |
-|------------|-------------------------------------------------------------|-------------|-------------|--------|---------------------------|---------------|-----------------------------------------------------|-------------------|
-| 1          | /path/to/art-source/Fusion.md                             | 0           | config.yaml | Fusion | 70th Avenue & Cornish St. | 1             | The sculpture is contemporary yet unmistakably Salish. | 7                 |
-| ...        | ...                                                         | ...         | ...         | ...    | ...                       | ...           | ...                                                 | ...               |
+Create a table with the following structure:
 
+============  ===========================================================  ===========  ===========  ======  =========================  =============  ======================================================  =================
+request_id    file                                                         chunknumber  run_tag      name    address                    first_nations  first_nations_quote                                     instagrammability
+============  ===========================================================  ===========  ===========  ======  =========================  =============  ======================================================  =================
+1             /path/to/art-source/Fusion.md                                0            config.yaml  Fusion  70th Avenue & Cornish St.  1              The sculpture is contemporary yet unmistakably Salish.  7
+...           ...                                                          ...          ...          ...     ...                        ...            ...                                                     ...
+============  ===========================================================  ===========  ===========  ======  =========================  =============  ======================================================  =================
 **Note on Chunking**: Files larger than the `chunk_size` configured in `defaults` or via `--chunk_size` are split into multiple chunks. Each chunk is processed independently by the LLM. The `chunknumber` column indicates which part of the file the extracted data pertains to. The `start` and `end` character indices for each chunk are stored in the `FCHUNKS` table.
 
 Tips for Efficient Field Extraction (Prompt-Engineering)
