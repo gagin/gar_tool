@@ -176,12 +176,15 @@ Installation
 
 1.  **Prerequisites**: Python 3.9+ and `pip`.
 2.  **Virtual Environment (Recommended)**:
+
     .. code-block:: 
 
         python -m venv venv
         source venv/bin/activate  # On Windows use `venv\Scripts\activate`
+
 3.  **Install Dependencies**:
     Create a `requirements.txt` file (or use the one provided if available) with contents like:
+
     .. code-block::
 
         PyYAML>=6.0,<7.0
@@ -190,11 +193,13 @@ Installation
         markitdown-python>=0.4.0,<0.5.0
 
     Then install:
+
     .. code-block:: 
 
         pip install -r requirements.txt
 
 4.  **Install `markitdown` Extras**: For PDF, DOCX, and PPTX support, install the necessary optional dependencies:
+   
     .. code-block:: 
 
         # Install support for specific formats you need:
@@ -204,6 +209,7 @@ Installation
         # pip install "markitdown[all]"
 
 5.  **API Key**: Create a `.env` file in the project root directory (where you run the command from) with your LLM provider API key (e.g., for OpenRouter):
+
     .. code-block:: 
 
         # .env file
@@ -216,10 +222,12 @@ Extraction Process
 
 1.  **Place Source Files**: Put your documents (`.pdf`, `.docx`, `.pptx`, `.md`, `.txt`) into the directory specified by `--data_folder` (or the default `./art-source`).
 2.  **Run the Extractor**: Execute the main module from the project root directory.
+
     .. code-block:: 
         python -m gar_tool.main --config config.yaml --data_folder ./art-source
 
     *   Use `--help` to see all command-line options which can override `config.yaml` settings.
+
 3.  **Processing**: The tool will:
     *   Identify files needing processing (new files or files with unprocessed chunks).
     *   Convert PDF/DOCX/PPTX files to text using `markitdown`.
@@ -229,6 +237,7 @@ Extraction Process
         *   Attempt to parse a JSON object from the LLM response.
         *   Log the request details and outcome to the `REQUEST_LOG` table.
         *   If successful (valid JSON, required fields present), store the extracted data in the `DATA` table (or the table name defined in `config.yaml`).
+
 4.  **Output**: The tool generates an SQLite database file (e.g., `public_art_vancouver.db`) in the directory where you run the command.
 
 Sample LLM JSON Output (for one chunk)
@@ -244,6 +253,7 @@ Sample LLM JSON Output (for one chunk)
       "visually_interesting": 7,
       "internal_notes": null
     }
+
 
 Results in SQLite (`public_art_vancouver.db`, `DATA` table)
 ----------------------------------------------------------
@@ -341,7 +351,7 @@ Command-Line Options
 
 Run `python -m gar_tool.main --help` to see the latest options and their defaults:
 
-.. code-block:: text
+.. code-block::
 
     # Output of: python -m gar_tool.main --help
     usage: main.py [-h] [--config CONFIG] [--data_folder DATA_FOLDER] [--results_db RESULTS_DB] [--chunk_size CHUNK_SIZE]

@@ -1,5 +1,6 @@
 # Extraction configuration
 name: public_art_vancouver_g # Used as a base name for SQLite file
+# this comment is to keep this file unicode 🤖
 
 # LLM configuration defaults, can be overridden by command line parameters
 defaults:
