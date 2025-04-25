@@ -1,0 +1,14 @@
+- Bug: takes config file name as db name instead of name in the config
+- Improvement: split Grounding section into universal and case-targeted sections, explain in README
+- Improvement: make descriptions and type optional (or test if they are already that) - everything is string, meaning deduced from column names, and allow automatically assume field to be recordable without db_column duplication
+- Test: does markitdown support binary doc out of the box, include `pip install markitdown[doc]' into the README
+- Improvement: support OCR
+- Improvement: support multimodal "chunks" to feed images directly to multimodal model
+- Improvement/Guide: include instruction how to rewrite config with Grok or other model
+- Improvement: include example in base config.yaml of timestamp type fields (and other types?)
+- Improvement/Guide: cover what source says / what source talks about difference in README/guide
+- Improvement/Conceptual: smart, context-aware chunker
+- Improvement/Guide: chunk length, context window requirements
+- Instruction/Guide: using datasette, datasette reload options
+- Technical: add unit tests
+- Technical: provide binaries

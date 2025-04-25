@@ -2,6 +2,8 @@ import os
 import re
 from typing import List, Tuple
 
+from .logging_wrapper import logger
+
 try:
     import markitdown
 except ImportError:
@@ -12,7 +14,7 @@ except ImportError:
     print("Install it using: pip install markitdown-python")
     markitdown = None
 
-from .logging_wrapper import logger
+
 
 
 def get_text_content(filepath: str) -> str:

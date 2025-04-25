@@ -1,166 +1,116 @@
+# gar_tool/cli.py
+
+from .helpers import collapse_whitespace
+from .logging_wrapper import logger
 import argparse
-import re
-from . import __version__ # Import version from package __init__
+from argparse import Namespace
 
-# Import default values from config_handler
-from .config_handler import (
-    DEFAULT_CHUNK_SIZE, DEFAULT_TEMPERATURE, DEFAULT_TIMEOUT,
-    DEFAULT_DATA_FOLDER, DEFAULT_MAX_FAILURES, DEFAULT_MODEL,
-    DEFAULT_PROVIDER, DEFAULT_MAX_LOG_LENGTH
-)
+from . import __version__ as VERSION
 
+def check_duplicate_args(argv): # Checks for duplicate named arguments and exits with an error if found.
+    """
+    Checks for duplicate named arguments and exits with an error.
 
-def collapse_whitespace(text: str):
-    """Replaces multiple whitespace chars with a single space."""
-    return re.sub(r'\s+', ' ', text.replace('\n', ' ')).strip()
+    Rationale:
+    Argparse silently overwrites duplicate single-value arguments, potentially
+    leading to user confusion and hidden errors. This function prevents this by
+    explicitly reporting duplicate named arguments, ensuring predictable and
+    transparent command-line argument handling.
+    """
+    seen_args = set()
 
+    for arg in argv[1:]:  # Start from index 1 to skip the script name
+        if arg.startswith('--'):  # Named argument
+            if arg in seen_args:
+                logger.critical_exit(f"Error: Duplicate argument '{arg}' found.")
+            seen_args.add(arg)
 
 def positive_int(value):
-    """Argparse type checker for positive integers."""
+    """Checks if a value is a positive integer."""
     try:
         ivalue = int(value)
-        if ivalue <= 0:
-            raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
-        return ivalue
     except ValueError:
         raise argparse.ArgumentTypeError(f"{value} is not an integer")
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(f"{value} is not a positive integer")
+    return ivalue
 
-def non_negative_int(value):
-    """Argparse type checker for non-negative integers."""
-    try:
-        ivalue = int(value)
-        if ivalue < 0:
-             raise argparse.ArgumentTypeError(f"{value} must be a non-negative integer")
-        return ivalue
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"{value} is not an integer")
+def parse_arguments() -> Namespace:
+    parser = argparse.ArgumentParser(description=collapse_whitespace("""
+    This command-line tool extracts specific information from large collections of 
+    text files and organizes it into a spreadsheet within a database, using 
+    Large Language Models (LLMs).  It's designed to assist with data that was 
+    once structured but is now in plain text, or when deriving new insights 
+    from unstructured information. Ideal for data analysts and researchers who 
+    need to convert unstructured or semi-structured text into analyzable data.
+    """))
 
+    config_group_control = parser.add_argument_group("Script control")    
+    config_group_control.add_argument('--config', type=str, default='config.yaml', help=collapse_whitespace("""
+        Path to the YAML configuration file containing extraction
+        parameters (default: %(default)s).
+    """))   
+    config_group_control.add_argument('--max_log_length', type=positive_int, default=200, help=collapse_whitespace("""
+        Maximum length (in characters) of loggin messages (mostly to limit excerpts for prompts and responses)
+        in debug logs (default: %(default)s).
+    """))
+    config_group_control.add_argument('--log_level', type=str, default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help=collapse_whitespace("""
+        Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        (default: %(default)s).
+    """))
+    config_group_control.add_argument("--version", action="version", version=f"%(prog)s {VERSION}", help=collapse_whitespace("""
+        Show program's version number and exit.
+    """))
 
-def temperature_float(value):
-     """Argparse type checker for temperature float (0.0 to 2.0)."""
-     try:
-          fvalue = float(value)
-          # Allow slightly wider range based on common models
-          if not (0.0 <= fvalue <= 2.0):
-               raise argparse.ArgumentTypeError(f"{value} must be between 0.0 and 2.0")
-          return fvalue
-     except ValueError:
-          raise argparse.ArgumentTypeError(f"{value} is not a valid float")
+    # Configuration from YAML file
+    config_group_io = parser.add_argument_group("Input and output (command line overwrites values from configuration YAML file)")
 
+    config_group_io.add_argument('--data_folder', type=str, help=collapse_whitespace("""
+        Path to the directory containing the text files to process.
+    """))
+    config_group_io.add_argument('--chunk_size', type=int, help=collapse_whitespace("""
+        Chunk size (in characters). Files exceeding this size will be
+        split into chunks. The combined chunk and prompt must fit within
+        the model's context window (measured in tokens, not characters).
+        Token length varies by language. See the README for details.
+    """))
+    config_group_io.add_argument('--results_db', type=str, help=collapse_whitespace("""
+        Name of the SQLite database file to store results. Be careful, the extension '.db' is not added automatically. 
+        If this argument is not specified, the project name from the YAML configuration file
+        is used.
+    """))
 
-def parse_arguments() -> argparse.Namespace:
-    """Parses command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description=collapse_whitespace("""
-        GAR: Generation-Augmented Retrieval Tool. Extracts structured data
-        from text files (txt, md, pdf, docx, pptx) using LLMs. Requires
-        'markitdown-python' for PDF/DOCX/PPTX. See README for details.
-        """),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter # Show defaults
-    )
+    config_group_ai = parser.add_argument_group("AI parameters (command line overwrites values from configuration YAML file)")
+    config_group_ai.add_argument('--model', type=str, help=collapse_whitespace("""
+        Name of the LLM to use for analysis (e.g., 'deepseek/deepseek-chat:floor').
+    """))
+    config_group_ai.add_argument('--provider', type=str, help=collapse_whitespace("""
+        Base URL of the LLM provider API (e.g., 'https://api.openrouter.ai/v1').
+        Default: OpenRouter.
+    """))
+    config_group_ai.add_argument('--skip_key_check', action='store_true', help=collapse_whitespace("""
+        Skip API key check (use for models that don't require keys, or
+        set OPENROUTER_API_KEY in .env to any non-empty value).
+    """))
+    config_group_ai.add_argument('--temperature', type=float, help=collapse_whitespace("""
+        Temperature for model generation (0.0 to 1.0). Higher values
+        increase creativity.  A value of 0 is recommended for predictable document processing.
+    """))
 
-    # --- Input/Output Group ---
-    io_group = parser.add_argument_group("Input and Output")
-    io_group.add_argument(
-        '--config', type=str, default='config.yaml',
-        help="Path to the YAML configuration file."
-    )
-    io_group.add_argument(
-        '--data_folder', type=str, default=DEFAULT_DATA_FOLDER,
-        help="Path to the directory containing source files."
-    )
-    io_group.add_argument(
-        '--results_db', type=str, default=None,
-        help="Name of the SQLite DB file. If None, uses '<config_name>.db'."
-    )
+    config_group_run = parser.add_argument_group("Run parameters (command line overwrites values from configuration YAML file)")
+    config_group_run.add_argument('--run_tag', type=str, help=collapse_whitespace("""
+        Tags records in the DATA table's 'run_tag' column with a run
+        label for comparison testing (allowing duplication of
+        file and chunk combinations).  Use this to differentiate
+        runs based on model name, field order, temperature, or other variations.
+        Default: file name of the YAML configuration.
+    """))
+    config_group_run.add_argument('--timeout', type=int, help=collapse_whitespace("""
+        Timeout (in seconds) for requests to the LLM API.
+    """))
+    config_group_run.add_argument('--max_failures', type=int, help=collapse_whitespace("""
+        Maximum number of consecutive failures allowed for a chunk before it
+        is skipped.
+    """))
 
-    # --- Processing Control Group ---
-    proc_group = parser.add_argument_group("Processing Control")
-    proc_group.add_argument(
-        '--chunk_size', type=positive_int, default=DEFAULT_CHUNK_SIZE,
-        help="Target chunk size in characters."
-    )
-    proc_group.add_argument(
-        '--max_failures', type=non_negative_int, default=DEFAULT_MAX_FAILURES,
-        help="Max consecutive LLM failures per chunk before skipping."
-    )
-    proc_group.add_argument(
-        '--run_tag', type=str, default=None,
-        help="Label for this run in DB (allows reruns). Defaults to config filename."
-    )
-
-    # --- AI Parameters Group ---
-    ai_group = parser.add_argument_group("AI Parameters")
-    ai_group.add_argument(
-        '--model', type=str, default=DEFAULT_MODEL,
-        help="Name of the LLM to use (provider-specific)."
-    )
-    ai_group.add_argument(
-        '--provider', type=str, default=DEFAULT_PROVIDER,
-        help="Base URL of the LLM provider API (OpenAI compatible)."
-    )
-    ai_group.add_argument(
-        '--temperature', type=temperature_float, default=DEFAULT_TEMPERATURE,
-        help="LLM temperature (0.0-2.0). Lower is more deterministic."
-    )
-    ai_group.add_argument(
-        '--timeout', type=positive_int, default=DEFAULT_TIMEOUT,
-        help="Timeout in seconds for LLM API requests."
-    )
-    ai_group.add_argument(
-        '--skip_key_check', action='store_true',
-        help="Skip API key check (e.g., for local models)."
-    )
-
-    # --- Script Behavior Group ---
-    script_group = parser.add_argument_group("Script Behavior")
-    script_group.add_argument(
-        '--max_log_length', type=non_negative_int, default=DEFAULT_MAX_LOG_LENGTH,
-        help="Max length for logged excerpts (LLM prompts/responses). 0=unlimited."
-    )
-    script_group.add_argument(
-        '--log_level', type=str, default='INFO',
-        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-        help="Set the logging level."
-    )
-    script_group.add_argument(
-        "--version", action="version",
-        version=f"%(prog)s {__version__}", # Get version from __init__
-        help="Show program's version number and exit."
-    )
-
-    args = parser.parse_args()
-
-    # Post-parsing validation/defaults
-    if args.results_db is None:
-        config_name = os.path.splitext(os.path.basename(args.config))[0]
-        args.results_db = f"{config_name}.db"
-
-    if args.run_tag is None:
-        args.run_tag = os.path.basename(args.config) # Default tag to config filename
-
-    return args
-
-# --- Utility function to check for duplicate arguments (Optional) ---
-import sys
-import os
-
-def check_duplicate_args(argv):
-    """Checks for duplicate named arguments (e.g., --foo ... --foo)."""
-    seen_args = set()
-    duplicates = []
-
-    for arg in argv[1:]:
-        if arg.startswith('--'):
-            arg_name = arg.split('=', 1)[0] # Handle --arg=value form
-            if arg_name in seen_args:
-                 if arg_name not in duplicates: # Report each duplicate only once
-                     duplicates.append(arg_name)
-            seen_args.add(arg_name)
-        # Stop checking after '--' if used
-        elif arg == '--':
-             break
-
-    if duplicates:
-        print(f"Error: Duplicate argument(s) found: {', '.join(duplicates)}", file=sys.stderr)
-        sys.exit(2) # Use standard exit code for CLI errors
+    return parser.parse_args()
