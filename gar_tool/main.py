@@ -99,10 +99,10 @@ def main():
         
         try:
 
-                
-            # --- ADD Cache and Set for efficiency ---
-            files_processed_this_session = set() # Stores files where content has been read/converted
+            # --- Cache and Set for efficiency ---
+            files_processed_this_session = set() # Stores files where content has been read/converted this session
             text_content_cache = {} # Stores content {file_path: content_string}
+            files_completed_this_run = set() # Stores files fully processed in this run
             # --- END Add Cache and Set ---
             
             while True:
@@ -111,99 +111,150 @@ def main():
                     logger.info("Loop interrupted by user signal.")
                     break
                 
-                # Get list of files currently in the data folder
+                # --- Step 1: Discover files, update cache, calculate/store chunks (mostly unchanged) ---
+                # This ensures we know about all files and have their chunks defined before picking one.
                 files_in_folder_full_path = [
                     os.path.abspath(os.path.join(config.inconfig_values.data_folder, f)) # Use absolute paths
                     for f in os.listdir(config.inconfig_values.data_folder)
                     if os.path.isfile(os.path.join(config.inconfig_values.data_folder, f))
                 ]
 
-                   # --- REVISED LOGIC to find unprocessed chunks ---
-                all_unprocessed_chunks = []
+                # Ensure content is cached and chunks are defined for all current files
                 for full_path in files_in_folder_full_path:
-                    # 1. Get/Cache Content & Calculate/Store Chunks (if needed)
                     if full_path not in files_processed_this_session:
-                        logger.debug(f"Reading/Converting file: {os.path.basename(full_path)}")
+                        logger.debug(f"Checking/Processing file for chunk definitions: {os.path.basename(full_path)}")
                         # --- Use file_processor's get_text_content ---
                         current_content = get_text_content(full_path)
-                        files_processed_this_session.add(full_path) # Mark as attempted
+                        files_processed_this_session.add(full_path) # Mark as visited this session
 
                         if current_content is None:
                              logger.error(f"File not found or inaccessible: {full_path}. Skipping.")
                              text_content_cache[full_path] = None # Cache None to indicate error
-                             continue # Skip to next file in folder
+                             continue # Skip chunk calculation for this file
                         elif current_content == "":
                              logger.warning(f"File {os.path.basename(full_path)} is empty or conversion failed. Skipping.")
                              text_content_cache[full_path] = "" # Cache empty string
-                             continue # Skip to next file in folder
+                             continue # Skip chunk calculation for this file
                         else:
                              text_content_cache[full_path] = current_content # Cache the content
 
                         # --- Calculate and store chunks using file_processor's calculate_chunks ---
                         if not db.chunk_exists(full_path):
                              logger.info(f"Calculating chunks for new file: {os.path.basename(full_path)}")
-                             # Pass the retrieved content and config size
                              chunk_bounds = calculate_chunks(current_content, config.inconfig_values.chunk_size)
                              if chunk_bounds:
                                  db.insert_chunks(full_path, chunk_bounds)
                              else:
                                  logger.warning(f"No chunks calculated for {os.path.basename(full_path)}. Content might be too small or calculation failed.")
-                                 # If no chunks, it won't appear in get_unprocessed_chunks below
 
-                    # 2. Find unprocessed chunks for *this file* (if content is valid)
-                    if full_path in text_content_cache and text_content_cache[full_path] is not None and text_content_cache[full_path] != "":
-                        unprocessed_for_file = db.get_unprocessed_chunks(
-                            full_path,
-                            start_iso
-                        )
-                        all_unprocessed_chunks.extend(unprocessed_for_file)
-                    # else: file had error or was empty, skip adding its chunks
+                # --- Step 2: Identify files that *currently* have unprocessed chunks AND haven't been completed ---
+                cursor = db.connection.cursor()
+                cursor.execute("SELECT DISTINCT file FROM FCHUNKS")
+                known_files_in_db = {row[0] for row in cursor.fetchall()}
+                files_in_folder_set = set(files_in_folder_full_path)
+                # Consider only files that are both in the DB and currently in the folder
+                relevant_files_in_db = list(known_files_in_db.intersection(files_in_folder_set))
 
-                if not all_unprocessed_chunks:
-                    logger.info("\nAll chunks processed or skipped!")
-                    break # Exit the while loop
+                files_needing_processing = []
+                logger.debug("Checking files for pending chunks...") # Add debug log
+                for file_path in relevant_files_in_db:
+                    # <<< CHECK if file is already marked as completed in this run >>>
+                    if file_path in files_completed_this_run:
+                        logger.debug(f"Skipping check for already completed file: {os.path.basename(file_path)}")
+                        continue
+                    # <<< END CHECK >>>
 
-                # Select a random chunk to process (keeps original logic)
-                file, chunk_number = random.choice(all_unprocessed_chunks)
-                logger.info(f"Processing {os.path.basename(file)} chunk {chunk_number}")
+                    # Ensure content is valid before checking for unprocessed chunks (existing check)
+                    if file_path in text_content_cache and text_content_cache[file_path] is not None and text_content_cache[file_path] != "":
+                        logger.debug(f"Querying unprocessed chunks for: {os.path.basename(file_path)}")
+                        unprocessed_check = db.get_unprocessed_chunks(file_path, start_iso)
+                        if unprocessed_check: # If the list of unprocessed chunks is not empty
+                            logger.debug(f"Found {len(unprocessed_check)} pending chunks for {os.path.basename(file_path)}. Adding to processing list.")
+                            files_needing_processing.append(file_path)
+                        else:
+                            logger.debug(f"No pending chunks found for {os.path.basename(file_path)}. Marking as completed for this run.")
+                            # If no unprocessed chunks are found here, mark it as complete for this run
+                            files_completed_this_run.add(file_path)
+                    else:
+                        logger.debug(f"Skipping check for file with invalid/missing content in cache: {os.path.basename(file_path)}")
+                        # File had error/was empty during step 1, or removed since start, skip.
 
-                # --- Retrieve the specific chunk's content from cache ---
-                if file not in text_content_cache or text_content_cache[file] is None:
-                     logger.error(f"Content for file {os.path.basename(file)} not found or is invalid in cache. Cannot process chunk {chunk_number}. Skipping.")
-                     # This chunk might get picked again, ideally we should mark it failed in DB?
-                     # For now, just skip this iteration.
-                     # To prevent infinite loop on this error, we might need to remove it from 'all_unprocessed_chunks' list
-                     # or implement a temporary skip list. Let's just log and continue for now.
-                     continue
+                if not files_needing_processing:
+                    logger.info("\nNo more files with unprocessed chunks found. All relevant files processed or skipped!")
+                    break # Exit the main while loop
 
-                text_content = text_content_cache[file]
-                chunk_bounds = db.get_chunk_bounds(file, chunk_number)
+                # --- Step 3: Select a random *file* and process its chunks sequentially ---
+                chosen_file_path = random.choice(files_needing_processing)
+                logger.info(f"Selected file for processing: {os.path.basename(chosen_file_path)}")
 
-                if not chunk_bounds:
-                     logger.error(f"Could not retrieve bounds for chunk {chunk_number} of {os.path.basename(file)}. Skipping.")
-                     # TODO: Log this as a failure in DB?
-                     continue
+                # Get *all* unprocessed chunks specifically for this chosen file
+                unprocessed_chunks_for_file = db.get_unprocessed_chunks(chosen_file_path, start_iso)
+                processed_all_listed_chunks = True # Flag to track if the inner loop processed all items it started with
 
-                try:
-                     # Slice the content based on stored bounds
-                     content_for_chunk = text_content[chunk_bounds[0]:chunk_bounds[1]]
-                except IndexError:
-                     logger.error(f"Error slicing content for {os.path.basename(file)} chunk {chunk_number}. Bounds: {chunk_bounds}, Text Length: {len(text_content)}. Skipping.")
-                     # TODO: Log this as a failure in DB?
-                     continue
-                except Exception as slice_e:
-                     logger.error(f"Unexpected error slicing content for {os.path.basename(file)} chunk {chunk_number}: {slice_e}. Skipping.")
-                     continue
-                # --- END OF Content Retrieval ---
+                # Process these chunks in order
+                for file, chunk_number in unprocessed_chunks_for_file: # 'file' will always be chosen_file_path here
+                    if signal_received:
+                        logger.info("Inner loop interrupted by user signal.")
+                        processed_all_listed_chunks = False # Didn't finish the planned batch
+                        break # Exit this inner for-loop
 
+                    logger.info(f"Processing {os.path.basename(file)} chunk {chunk_number}")
 
-                # --- Call the modified process_chunk, passing the content ---
-                analyzer.process_chunk(
-                    db=db,
-                    filename=file,
-                    chunk_number=chunk_number,
-                    chunk_content=content_for_chunk # Pass the actual content
-                )
+                    # --- Retrieve the specific chunk's content from cache ---
+                    if file not in text_content_cache or text_content_cache[file] is None:
+                         logger.error(f"Content for file {os.path.basename(file)} not found or is invalid in cache. Cannot process chunk {chunk_number}. Skipping.")
+                         # Mark that we didn't process everything intended for this file in this pass
+                         # processed_all_listed_chunks = False # Let's not do this, failure != interruption
+                         continue # Skip this chunk
+
+                    text_content = text_content_cache[file]
+                    chunk_bounds = db.get_chunk_bounds(file, chunk_number)
+
+                    if not chunk_bounds:
+                         logger.error(f"Could not retrieve bounds for chunk {chunk_number} of {os.path.basename(file)}. Skipping.")
+                         # processed_all_listed_chunks = False
+                         continue # Skip this chunk
+
+                    try:
+                         # Slice the content based on stored bounds
+                         content_for_chunk = text_content[chunk_bounds[0]:chunk_bounds[1]]
+                    except IndexError:
+                         logger.error(f"Error slicing content for {os.path.basename(file)} chunk {chunk_number}. Bounds: {chunk_bounds}, Text Length: {len(text_content)}. Skipping.")
+                         # processed_all_listed_chunks = False
+                         continue # Skip this chunk
+                    except Exception as slice_e:
+                         logger.error(f"Unexpected error slicing content for {os.path.basename(file)} chunk {chunk_number}: {slice_e}. Skipping.")
+                         # processed_all_listed_chunks = False
+                         continue # Skip this chunk
+                    # --- END OF Content Retrieval ---
+
+                    # --- Call the process_chunk ---
+                    # Success/failure is handled internally by process_chunk and logged to DB
+                    analyzer.process_chunk(
+                        db=db,
+                        filename=file,
+                        chunk_number=chunk_number,
+                        chunk_content=content_for_chunk # Pass the actual content
+                    )
+                # --- End of sequential chunk processing for the chosen file ---
+
+                # --- Step 4: Check completion status *after* attempting to process the batch ---
+                if signal_received: # If interrupted during the inner loop
+                     logger.info("Outer loop interrupted by user signal after file processing batch.")
+                     break # Exit the main while loop
+
+                # Only check for completion if the inner loop wasn't interrupted by signal
+                # We re-query to see the current state after the processing attempts
+                logger.debug(f"Re-checking unprocessed chunks for {os.path.basename(chosen_file_path)} after processing attempt.")
+                unprocessed_after_attempt = db.get_unprocessed_chunks(chosen_file_path, start_iso)
+                if not unprocessed_after_attempt:
+                    logger.info(f"Confirmed: File {os.path.basename(chosen_file_path)} now fully processed or all remaining chunks skipped for this run.")
+                    files_completed_this_run.add(chosen_file_path)
+                else:
+                    # This case means either some chunks failed and haven't hit max_failures yet,
+                    # or they were skipped due to errors before calling process_chunk.
+                    logger.info(f"File {os.path.basename(chosen_file_path)} still has {len(unprocessed_after_attempt)} unprocessed/pending chunks after this pass.")
+                    # The file remains *not* in files_completed_this_run and might be picked again later.
 
         finally:
             end_iso = get_current_timestamp_iso()
